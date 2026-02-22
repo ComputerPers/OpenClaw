@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1450" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1459" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -484,54 +484,57 @@ try_configure_telegram_channel() {
   return 2
 }
 
-configure_trusted_proxy_auth() {
+configure_gateway_auth() {
   local config_file="$TARGET_DIR/config/openclaw.json"
-  local docker_subnet="172.16.0.0/12"
 
   if [[ ! -f "$config_file" ]]; then
-    echo "Warning: openclaw.json not found at $config_file; skipping trusted-proxy auth." >&2
+    echo "Warning: openclaw.json not found at $config_file; skipping auth config." >&2
     return 1
   fi
 
-  echo "Configuring gateway auth for reverse-proxy deployment..."
+  echo "Configuring gateway auth for Docker reverse-proxy deployment..."
 
+  # We intentionally do NOT use auth.mode="trusted-proxy" because of bug #17761:
+  # trusted-proxy mode early-returns in the auth dispatcher and blocks ALL internal
+  # services (CLI, node host, bridges) that connect via loopback — they can't fall
+  # back to token/password auth. This breaks device approval from inside the container.
+  #
+  # Instead we rely on the default token auth mode. Caddy injects the gateway token
+  # as Authorization: Bearer for upstream HTTP/WS requests, and the CLI uses --token
+  # for direct loopback connections.
   if python3 -c '
 import json, sys
-path, subnet = sys.argv[1], sys.argv[2]
+path = sys.argv[1]
 try:
     with open(path) as f:
         c = json.load(f)
     gw = c.setdefault("gateway", {})
 
-    # Trusted-proxy auth: Caddy authenticates users via Basic Auth and injects
-    # X-Forwarded-User. The gateway trusts Caddy (Docker subnet) and uses the
-    # header value as user identity.
-    gw["auth"] = {
-        "mode": "trusted-proxy",
-        "trustedProxy": {"userHeader": "x-forwarded-user"}
-    }
-    gw["trustedProxies"] = [subnet]
+    # Remove trusted-proxy mode if previously set (installer upgrade path).
+    auth = gw.get("auth", {})
+    if auth.get("mode") == "trusted-proxy":
+        del auth["mode"]
+        auth.pop("trustedProxy", None)
+        gw["auth"] = auth
+    gw.pop("trustedProxies", None)
 
-    # Allow Control UI without device pairing (issue #4941).
-    # Docker NAT makes connections appear non-local, so auto-approval never fires.
-    # Non-localhost HTTP origins also lack Secure Context for the device identity
-    # handshake (Web Crypto API blocked). allowInsecureAuth bypasses both.
+    # Allow Control UI without device pairing handshake (issue #4941).
+    # Docker NAT makes connections appear non-local; non-localhost HTTP origins
+    # lack Secure Context for the Web Crypto device identity flow.
     # Security is handled by Caddy Basic Auth in front of the gateway.
     gw.setdefault("controlUi", {})["allowInsecureAuth"] = True
 
     with open(path, "w") as f:
         json.dump(c, f, indent=2)
-    print("Gateway auth configured (trusted-proxy + allowInsecureAuth).")
+    print("Gateway auth configured (token mode + allowInsecureAuth).")
 except Exception as e:
     print("Error:", e, file=sys.stderr)
     sys.exit(1)
-' "$config_file" "$docker_subnet"; then
+' "$config_file"; then
     return 0
   fi
 
   echo "Warning: Python3 config patch failed; using config set fallback." >&2
-  compose_cmd run --rm openclaw-cli config set gateway.auth.mode trusted-proxy || true
-  compose_cmd run --rm openclaw-cli config set gateway.auth.trustedProxy.userHeader x-forwarded-user || true
   compose_cmd run --rm openclaw-cli config set gateway.controlUi.allowInsecureAuth true || true
 }
 
@@ -674,14 +677,10 @@ gw = c.get("gateway", {})
 
 auth = gw.get("auth", {})
 mode = auth.get("mode", "")
-if mode != "trusted-proxy":
-    errors.append("gateway.auth.mode is \"" + mode + "\", expected \"trusted-proxy\"")
-header = auth.get("trustedProxy", {}).get("userHeader", "")
-if not header:
-    errors.append("gateway.auth.trustedProxy.userHeader is not set")
-proxies = gw.get("trustedProxies", [])
-if not proxies:
-    errors.append("gateway.trustedProxies list is empty")
+if mode == "trusted-proxy":
+    errors.append("gateway.auth.mode is still \"trusted-proxy\" — this blocks "
+                  "internal CLI connections (bug #17761). Remove it to use "
+                  "default token auth.")
 
 ui = gw.get("controlUi", {})
 if not ui.get("allowInsecureAuth"):
@@ -694,8 +693,7 @@ if errors:
         print("Error: " + e, file=sys.stderr)
     sys.exit(1)
 
-print("Gateway config OK: auth=trusted-proxy, header=" + header
-      + ", proxies=" + str(proxies) + ", allowInsecureAuth=true")
+print("Gateway config OK: auth=token (default), allowInsecureAuth=true")
 ' "$config_file" 2>&1; then
     echo "Error: gateway config validation failed." >&2
     return 1
@@ -706,7 +704,13 @@ print("Gateway config OK: auth=trusted-proxy, header=" + header
 gateway_exec_cli() {
   # Run an openclaw CLI command inside the gateway container via loopback.
   # Loopback connections are auto-approved by the gateway — no pairing needed.
+  #
+  # IMPORTANT: We use a temp HOME so the CLI gets a fresh device identity instead
+  # of reading stale device tokens from the gateway's shared config volume
+  # (/home/node/.openclaw). Reusing the gateway's identity causes
+  # "device_token_mismatch" because the gateway and CLI would clash.
   docker exec -u node openclaw-gateway \
+    env HOME=/tmp/openclaw-cli-approve \
     node dist/index.js "$@" \
     --url "ws://127.0.0.1:18789" \
     --token "${OPENCLAW_GATEWAY_TOKEN}"
@@ -805,8 +809,7 @@ run_health_checks() {
     return 1
   fi
 
-  # Step 8: validate gateway config (trusted-proxy auth must be set, otherwise
-  # browser clients will see "disconnected (1008): pairing required").
+  # Step 8: validate gateway config (allowInsecureAuth, no stale trusted-proxy mode).
   if ! check_gateway_config; then
     dump_compose_diagnostics
     failed=1
@@ -876,8 +879,8 @@ run_install() {
   fi
 
   # Must run AFTER all openclaw-cli config set commands — the CLI may overwrite the JSON
-  # and drop fields it doesn't know about (gateway.auth, gateway.trustedProxies).
-  configure_trusted_proxy_auth
+  # and drop fields it doesn't know about.
+  configure_gateway_auth
 
   echo "Restarting gateway to apply final config..."
   compose_cmd restart openclaw-gateway
