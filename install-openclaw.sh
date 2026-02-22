@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1652" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1725" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -46,7 +46,7 @@ print_banner() {
 }
 
 ensure_dirs() {
-  mkdir -p "$TARGET_DIR" "$TARGET_DIR/config" "$TARGET_DIR/workspace" "$CADDY_DIR"
+  mkdir -p "$TARGET_DIR" "$TARGET_DIR/config" "$TARGET_DIR/workspace" "$CADDY_DIR" "$TARGET_DIR/python-packages" "$TARGET_DIR/scripts"
 }
 
 write_compose() {
@@ -63,8 +63,11 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-./config}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-./workspace}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_PYTHON_DIR:-./python-packages}:/usr/local/lib/python-packages
+      - ${OPENCLAW_SCRIPTS_DIR:-./scripts}:/home/node/.openclaw/scripts
     init: true
     restart: unless-stopped
+    entrypoint: ["/home/node/.openclaw/scripts/entrypoint.sh"]
     command:
       [
         "node",
@@ -89,10 +92,12 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-./config}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-./workspace}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_PYTHON_DIR:-./python-packages}:/usr/local/lib/python-packages
+      - ${OPENCLAW_SCRIPTS_DIR:-./scripts}:/home/node/.openclaw/scripts
     stdin_open: true
     tty: true
     init: true
-    entrypoint: ["node", "dist/index.js"]
+    entrypoint: ["/home/node/.openclaw/scripts/entrypoint.sh", "node", "dist/index.js"]
 
   caddy:
     image: ${CADDY_IMAGE:-caddy:2-alpine}
@@ -127,6 +132,8 @@ OPENCLAW_GATEWAY_PORT=18789
 # Relative to this .env file location
 OPENCLAW_CONFIG_DIR=./config
 OPENCLAW_WORKSPACE_DIR=./workspace
+OPENCLAW_PYTHON_DIR=./python-packages
+OPENCLAW_SCRIPTS_DIR=./scripts
 
 # Required: OpenRouter API key (sk-or-...)
 OPENROUTER_API_KEY=
@@ -431,6 +438,75 @@ generate_caddyfile() {
   }
 }
 EOF
+}
+
+write_entrypoint_script() {
+  local entrypoint_file="$TARGET_DIR/scripts/entrypoint.sh"
+
+  cat >"$entrypoint_file" <<'ENTRYPOINT_EOF'
+#!/bin/sh
+set -e
+
+# Python packages directory
+PYTHON_PACKAGES_DIR="/usr/local/lib/python-packages"
+REQUIREMENTS_FILE="/home/node/.openclaw/requirements.txt"
+
+# Check if requirements.txt exists and install packages
+if [ -f "$REQUIREMENTS_FILE" ]; then
+    echo "Found requirements.txt, installing Python packages..."
+
+    # Ensure pip is available
+    if ! command -v pip3 >/dev/null 2>&1; then
+        echo "Installing pip..."
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache py3-pip python3-dev build-base || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y python3-pip python3-dev build-essential || true
+        fi
+    fi
+
+    # Install packages to persistent directory
+    export PYTHONPATH="${PYTHON_PACKAGES_DIR}:${PYTHONPATH}"
+    pip3 install --break-system-packages --target="$PYTHON_PACKAGES_DIR" -r "$REQUIREMENTS_FILE" 2>&1 | grep -v "WARNING: Running pip as the 'root' user" || true
+    echo "Python packages installed successfully."
+else
+    echo "No requirements.txt found, skipping Python package installation."
+fi
+
+# Set PYTHONPATH for the main process
+export PYTHONPATH="${PYTHON_PACKAGES_DIR}:${PYTHONPATH}"
+
+# Execute the main command
+exec "$@"
+ENTRYPOINT_EOF
+
+  chmod +x "$entrypoint_file"
+  echo "Created entrypoint script at $entrypoint_file"
+}
+
+write_requirements_template() {
+  local requirements_file="$TARGET_DIR/config/requirements.txt"
+
+  if [[ -f "$requirements_file" ]]; then
+    echo "requirements.txt already exists, skipping template creation."
+    return
+  fi
+
+  cat >"$requirements_file" <<'REQUIREMENTS_EOF'
+# Python packages for OpenClaw
+# Add your required packages here, one per line
+# Example:
+# python-docx
+# python-pptx
+# pandas
+# requests
+
+python-docx
+python-pptx
+REQUIREMENTS_EOF
+
+  echo "Created requirements.txt template at $requirements_file"
+  echo "You can edit this file to add more Python packages."
 }
 
 compose_cmd() {
@@ -907,6 +983,8 @@ run_install() {
   prompt_openrouter_model
   require_env_values
   prompt_telegram_token
+  write_entrypoint_script
+  write_requirements_template
   generate_caddyfile
 
   echo "Pulling images..."
