@@ -131,8 +131,7 @@ TELEGRAM_BOT_TOKEN=
 EOF
   chmod 600 "$ENV_FILE"
   echo "Created $ENV_FILE"
-  echo "Fill OPENROUTER_API_KEY and CADDY_PASSWORD, then run:"
-  echo "  $SCRIPT_NAME install"
+  echo "A .env template was created. Installer will prompt for required values."
 }
 
 load_env() {
@@ -207,6 +206,78 @@ require_env_values() {
   fi
 }
 
+prompt_var_if_empty() {
+  local var_name="$1"
+  local prompt_text="$2"
+  local secret="${3:-0}"
+  local current_value="${!var_name:-}"
+  local input_value=""
+
+  if [[ -n "$current_value" ]]; then
+    return
+  fi
+
+  if [[ ! -t 0 ]]; then
+    return
+  fi
+
+  while [[ -z "$input_value" ]]; do
+    if [[ "$secret" == "1" ]]; then
+      read -r -s -p "$prompt_text: " input_value
+      echo
+    else
+      read -r -p "$prompt_text: " input_value
+    fi
+
+    if [[ -z "$input_value" ]]; then
+      echo "Value cannot be empty."
+    fi
+  done
+
+  upsert_env "$var_name" "$input_value"
+  export "$var_name=$input_value"
+}
+
+prompt_required_env_values() {
+  prompt_var_if_empty "OPENROUTER_API_KEY" "Enter OPENROUTER_API_KEY (sk-or-...)" 1
+  prompt_var_if_empty "CADDY_USER" "Enter CADDY username"
+  prompt_var_if_empty "CADDY_PASSWORD" "Enter CADDY password" 1
+}
+
+prompt_openrouter_model() {
+  local default_model="openrouter/google/gemini-3-flash-preview"
+  local answer
+  local custom_model=""
+
+  if [[ -z "${OPENCLAW_MODEL:-}" ]]; then
+    OPENCLAW_MODEL="$default_model"
+    upsert_env "OPENCLAW_MODEL" "$OPENCLAW_MODEL"
+    export OPENCLAW_MODEL
+  fi
+
+  if [[ ! -t 0 ]]; then
+    return
+  fi
+
+  echo
+  read -r -p "Use model '${OPENCLAW_MODEL}'? [Y/n]: " answer
+  case "$answer" in
+    n|N|no|NO)
+      while [[ -z "$custom_model" ]]; do
+        read -r -p "Enter OpenRouter model (e.g. openrouter/google/gemini-3-flash-preview): " custom_model
+        if [[ -z "$custom_model" ]]; then
+          echo "Model value cannot be empty."
+        fi
+      done
+      OPENCLAW_MODEL="$custom_model"
+      upsert_env "OPENCLAW_MODEL" "$OPENCLAW_MODEL"
+      export OPENCLAW_MODEL
+      ;;
+    *)
+      ;;
+  esac
+}
+
 prompt_telegram_token() {
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     return
@@ -266,6 +337,8 @@ run_install() {
   write_env_template_if_missing
   load_env
   generate_gateway_token_if_empty
+  prompt_required_env_values
+  prompt_openrouter_model
   require_env_values
   prompt_telegram_token
   generate_caddyfile

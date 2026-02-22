@@ -28,6 +28,9 @@ curl -fsSL https://raw.githubusercontent.com/ComputerPers/OpenClaw/master/instal
 - `OPENROUTER_API_KEY`
 - `CADDY_PASSWORD`
 
+Инсталлятор также умеет сам запросить эти значения интерактивно при первом запуске.
+При установке он опционально предлагает выбрать модель OpenRouter; по умолчанию используется `openrouter/google/gemini-3-flash-preview`.
+
 После этого снова запустите:
 
 ```bash
