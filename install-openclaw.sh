@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1257" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1304" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -482,18 +482,49 @@ ensure_services_running() {
 
 run_health_checks() {
   local port="${OPENCLAW_GATEWAY_PORT:-18789}"
+  local ws_url="ws://openclaw-gateway:18789"
+  local max_attempts=12
+  local sleep_s=1
+  local attempt=1
+  local output=""
 
   ensure_services_running
 
-  if ! compose_cmd run --rm openclaw-cli health >/dev/null; then
-    echo "Error: OpenClaw health check failed." >&2
-    return 1
-  fi
+  # Run the gateway RPC probe from inside the docker network.
+  # Do NOT use ws://127.0.0.1 here: inside the openclaw-cli container it points to itself, not the gateway service.
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    set +e
+    output="$(compose_cmd run --rm openclaw-cli gateway health --url "$ws_url" --token "$OPENCLAW_GATEWAY_TOKEN" --timeout 20000 2>&1)"
+    rc=$?
+    set -e
 
-  if ! curl -fsS -u "${CADDY_USER}:${CADDY_PASSWORD}" "http://127.0.0.1:${port}/" >/dev/null; then
-    echo "Error: Caddy endpoint check failed on http://127.0.0.1:${port}/" >&2
-    return 1
-  fi
+    if [[ "$rc" -eq 0 ]]; then
+      break
+    fi
+
+    if [[ "$attempt" -eq "$max_attempts" ]]; then
+      echo "Error: OpenClaw gateway health check failed after ${max_attempts} attempts." >&2
+      printf '%s\n' "$output" >&2
+      return 1
+    fi
+
+    echo "Warning: gateway health probe failed (attempt ${attempt}/${max_attempts}); retrying..." >&2
+    sleep "$sleep_s"
+    attempt=$((attempt + 1))
+  done
+
+  attempt=1
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    if curl -fsS -u "${CADDY_USER}:${CADDY_PASSWORD}" "http://127.0.0.1:${port}/" >/dev/null; then
+      return 0
+    fi
+    if [[ "$attempt" -eq "$max_attempts" ]]; then
+      echo "Error: Caddy endpoint check failed on http://127.0.0.1:${port}/" >&2
+      return 1
+    fi
+    sleep "$sleep_s"
+    attempt=$((attempt + 1))
+  done
 }
 
 collect_host_ipv4() {
