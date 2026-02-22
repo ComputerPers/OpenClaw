@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1725" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1731" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -55,15 +55,17 @@ services:
   openclaw-gateway:
     image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
     container_name: openclaw-gateway
+    user: "0:0"
     environment:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENCLAW_USER: node
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-./config}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-./workspace}:/home/node/.openclaw/workspace
-      - ${OPENCLAW_PYTHON_DIR:-./python-packages}:/usr/local/lib/python-packages
+      - ${OPENCLAW_PYTHON_DIR:-./python-packages}:/home/node/.local/lib/python-packages
       - ${OPENCLAW_SCRIPTS_DIR:-./scripts}:/home/node/.openclaw/scripts
     init: true
     restart: unless-stopped
@@ -83,16 +85,18 @@ services:
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
     container_name: openclaw-cli
+    user: "0:0"
     environment:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       BROWSER: echo
+      OPENCLAW_USER: node
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-./config}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-./workspace}:/home/node/.openclaw/workspace
-      - ${OPENCLAW_PYTHON_DIR:-./python-packages}:/usr/local/lib/python-packages
+      - ${OPENCLAW_PYTHON_DIR:-./python-packages}:/home/node/.local/lib/python-packages
       - ${OPENCLAW_SCRIPTS_DIR:-./scripts}:/home/node/.openclaw/scripts
     stdin_open: true
     tty: true
@@ -448,36 +452,82 @@ write_entrypoint_script() {
 set -e
 
 # Python packages directory
-PYTHON_PACKAGES_DIR="/usr/local/lib/python-packages"
+PYTHON_PACKAGES_DIR="/home/node/.local/lib/python-packages"
 REQUIREMENTS_FILE="/home/node/.openclaw/requirements.txt"
+TARGET_USER="${OPENCLAW_USER:-node}"
 
-# Check if requirements.txt exists and install packages
-if [ -f "$REQUIREMENTS_FILE" ]; then
-    echo "Found requirements.txt, installing Python packages..."
-
-    # Ensure pip is available
-    if ! command -v pip3 >/dev/null 2>&1; then
-        echo "Installing pip..."
-        if command -v apk >/dev/null 2>&1; then
-            apk add --no-cache py3-pip python3-dev build-base || true
-        elif command -v apt-get >/dev/null 2>&1; then
-            apt-get update && apt-get install -y python3-pip python3-dev build-essential || true
-        fi
+# Function to run command as target user
+run_as_user() {
+    if [ "$(id -u)" -eq 0 ]; then
+        su-exec "$TARGET_USER" "$@" 2>/dev/null || sudo -u "$TARGET_USER" "$@" 2>/dev/null || su "$TARGET_USER" -c "$*"
+    else
+        "$@"
     fi
+}
 
-    # Install packages to persistent directory
-    export PYTHONPATH="${PYTHON_PACKAGES_DIR}:${PYTHONPATH}"
-    pip3 install --break-system-packages --target="$PYTHON_PACKAGES_DIR" -r "$REQUIREMENTS_FILE" 2>&1 | grep -v "WARNING: Running pip as the 'root' user" || true
-    echo "Python packages installed successfully."
-else
-    echo "No requirements.txt found, skipping Python package installation."
+# Only run package installation if we're root
+if [ "$(id -u)" -eq 0 ]; then
+    # Check if requirements.txt exists and install packages
+    if [ -f "$REQUIREMENTS_FILE" ]; then
+        echo "Found requirements.txt, installing Python packages as root..."
+
+        # Check if pip3 is available
+        if ! command -v pip3 >/dev/null 2>&1; then
+            echo "WARNING: pip3 is not available in this container."
+            echo "Attempting to install pip3..."
+            if command -v apk >/dev/null 2>&1; then
+                apk add --no-cache py3-pip python3-dev build-base 2>&1 | head -5 || echo "Failed to install via apk"
+            elif command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq && apt-get install -y -qq python3-pip python3-dev build-essential 2>&1 | head -5 || echo "Failed to install via apt"
+            fi
+        fi
+
+        if command -v pip3 >/dev/null 2>&1; then
+            # Ensure the packages directory exists and has correct ownership
+            mkdir -p "$PYTHON_PACKAGES_DIR"
+
+            # Get the UID/GID of the target user
+            USER_ID=$(id -u "$TARGET_USER" 2>/dev/null || echo "1000")
+            GROUP_ID=$(id -g "$TARGET_USER" 2>/dev/null || echo "1000")
+
+            # Install packages to persistent directory
+            echo "Installing packages from requirements.txt..."
+            pip3 install --break-system-packages --target="$PYTHON_PACKAGES_DIR" -r "$REQUIREMENTS_FILE" 2>&1 | grep -v "WARNING:" | grep -E "Successfully installed|Requirement already satisfied|Collecting" || true
+
+            # Fix ownership of installed packages
+            chown -R "${USER_ID}:${GROUP_ID}" "$PYTHON_PACKAGES_DIR" 2>/dev/null || true
+            chown -R "${USER_ID}:${GROUP_ID}" /home/node/.openclaw 2>/dev/null || true
+
+            echo "Python packages installed successfully."
+        else
+            echo "ERROR: pip3 is not available and could not be installed."
+            echo "Python packages cannot be installed automatically."
+        fi
+    else
+        echo "No requirements.txt found, skipping Python package installation."
+    fi
 fi
 
 # Set PYTHONPATH for the main process
 export PYTHONPATH="${PYTHON_PACKAGES_DIR}:${PYTHONPATH}"
 
-# Execute the main command
-exec "$@"
+# Switch to target user and execute the main command
+if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
+    echo "Switching to user: $TARGET_USER"
+    # Try different methods to switch user
+    if command -v su-exec >/dev/null 2>&1; then
+        exec su-exec "$TARGET_USER" "$@"
+    elif command -v gosu >/dev/null 2>&1; then
+        exec gosu "$TARGET_USER" "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        exec sudo -u "$TARGET_USER" -E "$@"
+    else
+        exec su "$TARGET_USER" -c "export PYTHONPATH='$PYTHONPATH'; exec $*"
+    fi
+else
+    # Already running as correct user or no user switch needed
+    exec "$@"
+fi
 ENTRYPOINT_EOF
 
   chmod +x "$entrypoint_file"
