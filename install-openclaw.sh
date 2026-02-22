@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1330" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1342" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -423,7 +423,9 @@ generate_caddyfile() {
   basic_auth {
     ${CADDY_USER} ${password_hash}
   }
-  reverse_proxy openclaw-gateway:18789
+  reverse_proxy openclaw-gateway:18789 {
+    header_up X-Forwarded-User {http.auth.user.id}
+  }
 }
 EOF
 }
@@ -480,6 +482,25 @@ try_configure_telegram_channel() {
   return 2
 }
 
+configure_trusted_proxy_auth() {
+  # Use trusted-proxy auth so the browser never needs to know the gateway token.
+  # Caddy authenticates users via Basic Auth and passes identity in X-Forwarded-User.
+  # Gateway trusts requests from the Docker network (172.16.0.0/12 covers all default
+  # Docker subnets) and grants access based on the header value.
+  #
+  # Uses a Node.js one-liner to patch openclaw.json atomically because
+  # `openclaw config set` does not support array values (trustedProxies).
+  local docker_subnet="172.16.0.0/12"
+  echo "Configuring gateway trusted-proxy auth..."
+  compose_cmd run --rm --entrypoint node openclaw-cli \
+    -e "var fs=require('fs'),p='/home/node/.openclaw/openclaw.json',c=JSON.parse(fs.readFileSync(p,'utf8'));c.gateway=c.gateway||{};c.gateway.auth={mode:'trusted-proxy',trustedProxy:{userHeader:'x-forwarded-user'}};c.gateway.trustedProxies=['${docker_subnet}'];fs.writeFileSync(p,JSON.stringify(c,null,2));console.log('Gateway trusted-proxy auth configured.');" \
+    || {
+      echo "Warning: failed to configure trusted-proxy auth via node; falling back to config set." >&2
+      compose_cmd run --rm openclaw-cli config set gateway.auth.mode trusted-proxy || true
+      compose_cmd run --rm openclaw-cli config set gateway.auth.trustedProxy.userHeader x-forwarded-user || true
+    }
+}
+
 dump_compose_diagnostics() {
   echo >&2
   echo "---- docker compose ps ----" >&2
@@ -512,59 +533,30 @@ ensure_services_running() {
 
 run_health_checks() {
   local port="${OPENCLAW_GATEWAY_PORT:-18789}"
-  local ws_url="ws://openclaw-gateway:18789"
-  local max_attempts=10
+  local max_attempts=20
   local sleep_s=2
   local attempt=1
-  local output=""
-  local rc=0
 
+  # Step 1: verify both containers are in running state.
   ensure_services_running
 
-  # Run the gateway RPC probe from inside the docker network.
-  # Do NOT use ws://127.0.0.1 here: inside the openclaw-cli container it points to itself, not the gateway service.
+  # Step 2: wait for the Caddy HTTP endpoint to respond.
+  # We do NOT probe the gateway WebSocket directly: the gateway requires device pairing for
+  # new CLI connections, so a raw WS connect from openclaw-cli would be rejected with
+  # 1008 "pairing required" even when everything is perfectly healthy. Caddy up + gateway
+  # container running is a sufficient indicator of a successful install.
+  echo "Waiting for Caddy endpoint http://127.0.0.1:${port}/ ..."
   while [[ "$attempt" -le "$max_attempts" ]]; do
-    set +e
-    output="$(compose_cmd run --rm openclaw-cli gateway health --url "$ws_url" --token "$OPENCLAW_GATEWAY_TOKEN" --timeout 20000 2>&1)"
-    rc=$?
-    set -e
-
-    if [[ "$rc" -eq 0 ]]; then
-      break
-    fi
-
-    # Some builds may run without token auth (or with different auth); try once without token.
-    if [[ "$attempt" -eq 1 ]]; then
-      set +e
-      output="$(compose_cmd run --rm openclaw-cli gateway health --url "$ws_url" --timeout 20000 2>&1)"
-      rc=$?
-      set -e
-      if [[ "$rc" -eq 0 ]]; then
-        break
-      fi
-    fi
-
-    if [[ "$attempt" -eq "$max_attempts" ]]; then
-      echo "Error: OpenClaw gateway health check failed after ${max_attempts} attempts." >&2
-      printf '%s\n' "$output" >&2
-      dump_compose_diagnostics
-      return 1
-    fi
-
-    echo "Warning: gateway health probe failed (attempt ${attempt}/${max_attempts}); retrying..." >&2
-    sleep "$sleep_s"
-    attempt=$((attempt + 1))
-  done
-
-  attempt=1
-  while [[ "$attempt" -le "$max_attempts" ]]; do
-    if curl -fsS -u "${CADDY_USER}:${CADDY_PASSWORD}" "http://127.0.0.1:${port}/" >/dev/null; then
+    if curl -fsS -u "${CADDY_USER}:${CADDY_PASSWORD}" "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+      echo "Caddy endpoint is up."
       return 0
     fi
     if [[ "$attempt" -eq "$max_attempts" ]]; then
-      echo "Error: Caddy endpoint check failed on http://127.0.0.1:${port}/" >&2
+      echo "Error: Caddy endpoint check failed on http://127.0.0.1:${port}/ after ${max_attempts} attempts." >&2
+      dump_compose_diagnostics
       return 1
     fi
+    echo "Warning: Caddy not ready yet (attempt ${attempt}/${max_attempts}); retrying..." >&2
     sleep "$sleep_s"
     attempt=$((attempt + 1))
   done
@@ -616,6 +608,7 @@ run_install() {
   # eth0), not just loopback. Without this the CLI container can't reach the gateway by Docker
   # service name, causing health checks to fail with WS 1006.
   compose_cmd run --rm openclaw-cli config set gateway.bind lan || true
+  configure_trusted_proxy_auth
 
   echo "Verifying OpenRouter auth (small live probe)..."
   compose_cmd run --rm openclaw-cli models status --probe --probe-provider openrouter --probe-max-tokens 8 >/dev/null
@@ -636,7 +629,10 @@ run_install() {
   fi
 
   echo
-  echo "OpenClaw is up."
+  echo "================================================================"
+  echo " OpenClaw is up."
+  echo "================================================================"
+  echo
   echo "Access URLs (IPv4):"
   echo "  http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/"
   while IFS= read -r ipv4; do
@@ -644,11 +640,12 @@ run_install() {
     echo "  http://${ipv4}:${OPENCLAW_GATEWAY_PORT:-18789}/"
   done < <(collect_host_ipv4)
   echo
-  echo "Caddy Basic Auth login:"
+  echo "Login (Basic Auth):"
   echo "  Username: ${CADDY_USER}"
   echo "  Password: value from ${ENV_FILE} -> CADDY_PASSWORD"
   echo
-  echo "These URLs use all non-loopback IPv4 addresses found on this host."
+  echo "The gateway token is injected automatically by the proxy — no manual setup needed."
+  echo "================================================================"
 }
 
 run_telegram() {
