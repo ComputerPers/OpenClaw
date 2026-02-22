@@ -268,7 +268,8 @@ prompt_openrouter_model() {
   if [[ -z "${OPENCLAW_MODEL:-}" ]]; then
     selected_model="$default_model"
   else
-    selected_model="$OPENCLAW_MODEL"
+    OPENCLAW_MODEL="$OPENCLAW_MODEL"
+    return
   fi
 
   if [[ -r /dev/tty ]]; then
@@ -357,6 +358,39 @@ compose_cmd() {
   docker compose --project-directory "$TARGET_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+ensure_services_running() {
+  local required_services="openclaw-gateway caddy"
+  local missing=0
+  local service
+
+  for service in $required_services; do
+    if ! compose_cmd ps --status running --services | awk -v s="$service" '$0 == s { found=1 } END { exit found ? 0 : 1 }'; then
+      echo "Error: service is not running: $service" >&2
+      missing=1
+    fi
+  done
+
+  if [[ "$missing" -ne 0 ]]; then
+    return 1
+  fi
+}
+
+run_health_checks() {
+  local port="${OPENCLAW_GATEWAY_PORT:-18789}"
+
+  ensure_services_running
+
+  if ! compose_cmd run --rm openclaw-cli health >/dev/null; then
+    echo "Error: OpenClaw health check failed." >&2
+    return 1
+  fi
+
+  if ! curl -fsS -u "${CADDY_USER}:${CADDY_PASSWORD}" "http://127.0.0.1:${port}/" >/dev/null; then
+    echo "Error: Caddy endpoint check failed on http://127.0.0.1:${port}/" >&2
+    return 1
+  fi
+}
+
 collect_host_ipv4() {
   if ! command -v ifconfig >/dev/null 2>&1; then
     return
@@ -387,7 +421,8 @@ run_install() {
   echo "Pulling images..."
   compose_cmd pull
 
-  echo "Starting gateway and caddy..."
+  echo "Restarting OpenClaw services..."
+  compose_cmd down --remove-orphans || true
   compose_cmd up -d openclaw-gateway caddy
 
   echo "Running OpenRouter onboarding..."
@@ -412,6 +447,9 @@ run_install() {
   echo "Restarting gateway to apply final config..."
   compose_cmd restart openclaw-gateway
 
+  echo "Running post-install checks..."
+  run_health_checks
+
   echo
   echo "OpenClaw is up."
   echo "Access URLs (IPv4):"
@@ -420,6 +458,10 @@ run_install() {
     [[ -z "$ipv4" ]] && continue
     echo "  http://${ipv4}:${OPENCLAW_GATEWAY_PORT:-18789}/"
   done < <(collect_host_ipv4)
+  echo
+  echo "Caddy Basic Auth login:"
+  echo "  Username: ${CADDY_USER}"
+  echo "  Password: value from ${ENV_FILE} -> CADDY_PASSWORD"
   echo
   echo "These URLs use all non-loopback IPv4 addresses found on this host."
 }
@@ -452,6 +494,7 @@ main() {
 
   require_cmd docker
   require_cmd openssl
+  require_cmd curl
   require_docker_compose
 
   case "$action" in
