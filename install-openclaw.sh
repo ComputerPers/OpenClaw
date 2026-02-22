@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1319" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1327" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -68,6 +68,7 @@ services:
         "node",
         "dist/index.js",
         "gateway",
+        "--allow-unconfigured",
         "--bind",
         "${OPENCLAW_GATEWAY_BIND:-lan}",
         "--port",
@@ -419,7 +420,7 @@ generate_caddyfile() {
 
   cat >"$CADDY_FILE" <<EOF
 :18789 {
-  basicauth {
+  basic_auth {
     ${CADDY_USER} ${password_hash}
   }
   reverse_proxy openclaw-gateway:18789
@@ -606,10 +607,14 @@ run_install() {
   echo "Configuring OpenRouter model: $OPENCLAW_MODEL"
   compose_cmd run --rm openclaw-cli models set "$OPENCLAW_MODEL"
 
-  # Force gateway.bind=lan in openclaw.json so the gateway listens on the container's LAN
-  # interface (0.0.0.0 / eth0), not just loopback. Without this the CLI container can't reach
-  # the gateway by Docker service name, causing health checks to fail with WS 1006.
-  echo "Setting gateway bind mode: lan"
+  # Set gateway.mode=local so the gateway doesn't block on startup (without this it refuses
+  # to start and crash-loops). --allow-unconfigured in the compose command covers the first
+  # boot before this config is written; subsequent restarts use the config value.
+  echo "Setting gateway mode and bind..."
+  compose_cmd run --rm openclaw-cli config set gateway.mode local || true
+  # Force gateway.bind=lan so the gateway listens on the container's LAN interface (0.0.0.0 /
+  # eth0), not just loopback. Without this the CLI container can't reach the gateway by Docker
+  # service name, causing health checks to fail with WS 1006.
   compose_cmd run --rm openclaw-cli config set gateway.bind lan || true
 
   echo "Verifying OpenRouter auth (small live probe)..."
