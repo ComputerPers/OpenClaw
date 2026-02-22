@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1304" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1319" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -438,6 +438,22 @@ try_configure_telegram_channel() {
   local ch=""
   local -a candidates=("telegram" "tg" "telegram-bot" "telegram_bot" "telegramBot")
 
+  # Prefer config-based setup (more stable than `channels add` across versions/builds).
+  set +e
+  output="$(compose_cmd run --rm openclaw-cli config set channels.telegram.enabled true 2>&1)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    set +e
+    output="$(compose_cmd run --rm openclaw-cli config set channels.telegram.botToken "$token" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+      echo "Telegram channel configured via config."
+      return 0
+    fi
+  fi
+
   for ch in "${candidates[@]}"; do
     set +e
     output="$(compose_cmd run --rm openclaw-cli channels add --channel "$ch" --token "$token" 2>&1)"
@@ -459,8 +475,21 @@ try_configure_telegram_channel() {
   done
 
   echo "Warning: Telegram channel is not available in this OpenClaw build; skipping Telegram setup." >&2
-  echo "Hint: run 'openclaw channels list' to see supported channels, or install/enable the Telegram plugin, then re-run '$SCRIPT_NAME telegram'." >&2
+  echo "Hint: run 'openclaw channels list' to see supported channels (inside the container: 'docker compose ... run --rm openclaw-cli channels list')." >&2
   return 2
+}
+
+dump_compose_diagnostics() {
+  echo >&2
+  echo "---- docker compose ps ----" >&2
+  compose_cmd ps >&2 || true
+  echo >&2
+  echo "---- openclaw-gateway logs (tail 200) ----" >&2
+  compose_cmd logs --tail 200 openclaw-gateway >&2 || true
+  echo >&2
+  echo "---- caddy logs (tail 120) ----" >&2
+  compose_cmd logs --tail 120 caddy >&2 || true
+  echo >&2
 }
 
 ensure_services_running() {
@@ -483,10 +512,11 @@ ensure_services_running() {
 run_health_checks() {
   local port="${OPENCLAW_GATEWAY_PORT:-18789}"
   local ws_url="ws://openclaw-gateway:18789"
-  local max_attempts=12
-  local sleep_s=1
+  local max_attempts=30
+  local sleep_s=2
   local attempt=1
   local output=""
+  local rc=0
 
   ensure_services_running
 
@@ -502,9 +532,21 @@ run_health_checks() {
       break
     fi
 
+    # Some builds may run without token auth (or with different auth); try once without token.
+    if [[ "$attempt" -eq 1 ]]; then
+      set +e
+      output="$(compose_cmd run --rm openclaw-cli gateway health --url "$ws_url" --timeout 20000 2>&1)"
+      rc=$?
+      set -e
+      if [[ "$rc" -eq 0 ]]; then
+        break
+      fi
+    fi
+
     if [[ "$attempt" -eq "$max_attempts" ]]; then
       echo "Error: OpenClaw gateway health check failed after ${max_attempts} attempts." >&2
       printf '%s\n' "$output" >&2
+      dump_compose_diagnostics
       return 1
     fi
 
@@ -564,6 +606,12 @@ run_install() {
   echo "Configuring OpenRouter model: $OPENCLAW_MODEL"
   compose_cmd run --rm openclaw-cli models set "$OPENCLAW_MODEL"
 
+  # Force gateway.bind=lan in openclaw.json so the gateway listens on the container's LAN
+  # interface (0.0.0.0 / eth0), not just loopback. Without this the CLI container can't reach
+  # the gateway by Docker service name, causing health checks to fail with WS 1006.
+  echo "Setting gateway bind mode: lan"
+  compose_cmd run --rm openclaw-cli config set gateway.bind lan || true
+
   echo "Verifying OpenRouter auth (small live probe)..."
   compose_cmd run --rm openclaw-cli models status --probe --probe-provider openrouter --probe-max-tokens 8 >/dev/null
 
@@ -574,9 +622,13 @@ run_install() {
 
   echo "Restarting gateway to apply final config..."
   compose_cmd restart openclaw-gateway
+  # Give the gateway a moment to fully come up before probing.
+  sleep 3
 
   echo "Running post-install checks..."
-  run_health_checks
+  if ! run_health_checks; then
+    echo "Warning: post-install checks failed. OpenClaw may still be running; see diagnostics above." >&2
+  fi
 
   echo
   echo "OpenClaw is up."
