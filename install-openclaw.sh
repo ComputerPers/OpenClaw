@@ -513,7 +513,7 @@ ensure_services_running() {
 run_health_checks() {
   local port="${OPENCLAW_GATEWAY_PORT:-18789}"
   local ws_url="ws://openclaw-gateway:18789"
-  local max_attempts=30
+  local max_attempts=10
   local sleep_s=2
   local attempt=1
   local output=""
