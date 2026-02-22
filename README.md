@@ -54,6 +54,16 @@ Telegram-токен скрипт запрашивает напрямую (скр
 ./install-openclaw.sh telegram
 ```
 
+### Одобрить pairing Telegram (код из сообщения бота)
+
+Когда бот присылает 8-символьный код (например, `WZXXHBZ1`) для pairing, выполните:
+
+```bash
+./install-openclaw.sh pairing approve telegram WZXXHBZ1
+```
+
+Замените `WZXXHBZ1` на ваш код. Коды действительны 1 час.
+
 ## Как начать работать после установки
 
 - **Через Web UI:** откройте `http://localhost:18789` (или `http://<IP_вашего_Mac>:18789` из LAN), пройдите Basic Auth, затем в Dashboard подключитесь к Gateway.

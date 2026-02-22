@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1630" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1649" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -15,6 +15,7 @@ usage() {
 Usage:
   $SCRIPT_NAME install      # create/update files, run OpenClaw + Caddy, onboard OpenRouter, set model, prompt Telegram setup
   $SCRIPT_NAME approve      # approve a pending device (run after opening the dashboard in browser)
+  $SCRIPT_NAME pairing approve telegram <CODE>  # approve Telegram pairing (8-char code from bot message)
   $SCRIPT_NAME telegram     # connect Telegram bot using TELEGRAM_BOT_TOKEN from .env
   $SCRIPT_NAME status       # show docker compose status
 
@@ -758,6 +759,19 @@ run_approve() {
   fi
 }
 
+run_pairing_approve_telegram() {
+  local code="${1:-}"
+  if [[ -z "$code" ]]; then
+    echo "Usage: $SCRIPT_NAME pairing approve telegram <CODE>" >&2
+    echo "Get the 8-character code from the Telegram message from your bot." >&2
+    echo "Codes expire after 1 hour." >&2
+    exit 1
+  fi
+  load_env
+  echo "Approving Telegram pairing code: $code"
+  gateway_exec_cli pairing approve telegram "$code" 2>&1
+}
+
 run_health_checks() {
   local port="${OPENCLAW_GATEWAY_PORT:-18789}"
   local max_attempts=20
@@ -841,6 +855,48 @@ collect_host_ipv4() {
   ' | awk '!seen[$0]++'
 }
 
+check_lan_access() {
+  local port="$1"
+  local localhost_ok=0
+  local lan_ok=0
+  local lan_ip=""
+
+  if curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 \
+      -u "${CADDY_USER}:${CADDY_PASSWORD}" \
+      "http://127.0.0.1:${port}/" 2>/dev/null | grep -q 200; then
+    localhost_ok=1
+  fi
+
+  lan_ip="$(collect_host_ipv4 | head -1)"
+  if [[ -n "$lan_ip" ]]; then
+    if curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 \
+        -u "${CADDY_USER}:${CADDY_PASSWORD}" \
+        "http://${lan_ip}:${port}/" 2>/dev/null | grep -q 200; then
+      lan_ok=1
+    fi
+  fi
+
+  if [[ "$localhost_ok" -eq 1 && "$lan_ok" -eq 0 && -n "$lan_ip" ]]; then
+    echo >&2
+    echo "================================================================" >&2
+    echo " LAN access not available (Docker Desktop Mac)" >&2
+    echo "================================================================" >&2
+    echo " Dashboard works on localhost but not on http://${lan_ip}:${port}/" >&2
+    echo " Docker Desktop binds published ports to localhost only by default." >&2
+    echo >&2
+    echo " To enable LAN access:" >&2
+    echo "   1. Docker Desktop → Settings (gear icon)" >&2
+    echo "   2. Resources → Network" >&2
+    echo "   3. Port binding behavior → set to 'Bind to all interfaces'" >&2
+    echo "      (or disable 'Only bind to localhost when exposing ports')" >&2
+    echo "   4. Apply & Restart" >&2
+    echo "   5. Re-run: $SCRIPT_NAME install" >&2
+    echo "================================================================" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_install() {
   ensure_dirs
   write_compose
@@ -912,6 +968,7 @@ run_install() {
   echo "  Username: ${CADDY_USER}"
   echo "  Password: value from ${ENV_FILE} -> CADDY_PASSWORD"
   echo
+  check_lan_access "$port" || true
   echo "================================================================"
   echo
 
@@ -967,6 +1024,14 @@ main() {
       ;;
     approve)
       run_approve
+      ;;
+    pairing)
+      if [[ "${2:-}" == "approve" && "${3:-}" == "telegram" ]]; then
+        run_pairing_approve_telegram "${4:-}"
+      else
+        echo "Usage: $SCRIPT_NAME pairing approve telegram <CODE>" >&2
+        exit 1
+      fi
       ;;
     telegram)
       run_telegram
