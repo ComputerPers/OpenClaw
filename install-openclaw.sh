@@ -217,22 +217,38 @@ prompt_var_if_empty() {
     return
   fi
 
-  if [[ ! -t 0 ]]; then
+  local input_fd=0
+  if [[ -r /dev/tty ]]; then
+    input_fd=9
+    exec 9</dev/tty
+  elif [[ ! -t 0 ]]; then
     return
   fi
 
   while [[ -z "$input_value" ]]; do
     if [[ "$secret" == "1" ]]; then
-      read -r -s -p "$prompt_text: " input_value
+      if [[ "$input_fd" -eq 9 ]]; then
+        read -r -u 9 -s -p "$prompt_text: " input_value
+      else
+        read -r -s -p "$prompt_text: " input_value
+      fi
       echo
     else
-      read -r -p "$prompt_text: " input_value
+      if [[ "$input_fd" -eq 9 ]]; then
+        read -r -u 9 -p "$prompt_text: " input_value
+      else
+        read -r -p "$prompt_text: " input_value
+      fi
     fi
 
     if [[ -z "$input_value" ]]; then
       echo "Value cannot be empty."
     fi
   done
+
+  if [[ "$input_fd" -eq 9 ]]; then
+    exec 9<&-
+  fi
 
   upsert_env "$var_name" "$input_value"
   export "$var_name=$input_value"
@@ -255,16 +271,28 @@ prompt_openrouter_model() {
     export OPENCLAW_MODEL
   fi
 
-  if [[ ! -t 0 ]]; then
+  local input_fd=0
+  if [[ -r /dev/tty ]]; then
+    input_fd=9
+    exec 9</dev/tty
+  elif [[ ! -t 0 ]]; then
     return
   fi
 
   echo
-  read -r -p "Use model '${OPENCLAW_MODEL}'? [Y/n]: " answer
+  if [[ "$input_fd" -eq 9 ]]; then
+    read -r -u 9 -p "Use model '${OPENCLAW_MODEL}'? [Y/n]: " answer
+  else
+    read -r -p "Use model '${OPENCLAW_MODEL}'? [Y/n]: " answer
+  fi
   case "$answer" in
     n|N|no|NO)
       while [[ -z "$custom_model" ]]; do
-        read -r -p "Enter OpenRouter model (e.g. openrouter/google/gemini-3-flash-preview): " custom_model
+        if [[ "$input_fd" -eq 9 ]]; then
+          read -r -u 9 -p "Enter OpenRouter model (e.g. openrouter/google/gemini-3-flash-preview): " custom_model
+        else
+          read -r -p "Enter OpenRouter model (e.g. openrouter/google/gemini-3-flash-preview): " custom_model
+        fi
         if [[ -z "$custom_model" ]]; then
           echo "Model value cannot be empty."
         fi
@@ -276,6 +304,10 @@ prompt_openrouter_model() {
     *)
       ;;
   esac
+
+  if [[ "$input_fd" -eq 9 ]]; then
+    exec 9<&-
+  fi
 }
 
 prompt_telegram_token() {
@@ -283,16 +315,28 @@ prompt_telegram_token() {
     return
   fi
 
-  if [[ ! -t 0 ]]; then
+  local input_fd=0
+  if [[ -r /dev/tty ]]; then
+    input_fd=9
+    exec 9</dev/tty
+  elif [[ ! -t 0 ]]; then
     return
   fi
 
   local answer
   echo
-  read -r -p "Configure Telegram now? [y/N]: " answer
+  if [[ "$input_fd" -eq 9 ]]; then
+    read -r -u 9 -p "Configure Telegram now? [y/N]: " answer
+  else
+    read -r -p "Configure Telegram now? [y/N]: " answer
+  fi
   case "$answer" in
     y|Y|yes|YES)
-      read -r -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
+      if [[ "$input_fd" -eq 9 ]]; then
+        read -r -u 9 -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
+      else
+        read -r -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
+      fi
       if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         upsert_env "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
         export TELEGRAM_BOT_TOKEN
@@ -303,6 +347,10 @@ prompt_telegram_token() {
     *)
       ;;
   esac
+
+  if [[ "$input_fd" -eq 9 ]]; then
+    exec 9<&-
+  fi
 }
 
 generate_caddyfile() {
