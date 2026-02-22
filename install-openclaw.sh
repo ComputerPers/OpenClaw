@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+INSTALLER_VERSION="220226-1231"
+
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
 ENV_FILE="$TARGET_DIR/.env"
@@ -33,6 +35,12 @@ require_docker_compose() {
     echo "Error: docker compose v2 is required." >&2
     exit 1
   fi
+}
+
+print_banner() {
+  echo "OpenClaw Docker installer v${INSTALLER_VERSION}"
+  echo "Environment dir: ${TARGET_DIR}"
+  echo
 }
 
 ensure_dirs() {
@@ -492,6 +500,8 @@ run_status() {
 
 main() {
   local action="${1:-install}"
+
+  print_banner
 
   require_cmd docker
   require_cmd openssl
