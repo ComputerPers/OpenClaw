@@ -11,13 +11,19 @@ curl -fsSL https://raw.githubusercontent.com/ComputerPers/OpenClaw/master/instal
 ## Что сделает инсталлятор
 
 - создаст рабочую среду в `~/OpenClawEnvironment` (или в `OPENCLAW_ENV_DIR`, если задан);
-- создаст структуру каталогов: `config`, `workspace`, `caddy`;
+- создаст структуру каталогов: `config`, `workspace`, `caddy`, `python-packages`, `scripts`;
+- скачает из GitHub или создаст локально:
+  - `Dockerfile.openclaw-python` — кастомный образ с Python и pip3
+  - `entrypoint.sh` — скрипт автоустановки Python пакетов при старте
+  - `requirements.txt` — список Python пакетов (`python-docx`, `python-pptx`)
+- соберет кастомный Docker образ `openclaw-python:local` с предустановленным Python (один раз, 2-3 минуты);
 - сгенерирует `docker-compose.yml` c сервисами `openclaw-gateway`, `openclaw-cli`, `caddy`;
 - создаст `.env`-шаблон (права `600`) для ключей и параметров;
 - сгенерирует `OPENCLAW_GATEWAY_TOKEN`, если он не задан;
 - создаст `caddy/Caddyfile` с bcrypt-хешем пароля для Basic Auth;
 - подтянет Docker-образы и запустит контейнеры;
 - установит модель через OpenRouter (по умолчанию `openrouter/google/gemini-3-flash-preview`) и проверит ключ OpenRouter коротким live-probe;
+- автоматически установит Python пакеты из `requirements.txt` в постоянный volume;
 - выведет локальный и LAN URL для доступа к админке.
 
 ## Важно при первом запуске
@@ -70,3 +76,29 @@ Telegram-токен скрипт запрашивает напрямую (скр
 - **Через Telegram:** если токен задан, просто напишите вашему боту в Telegram и начните диалог с OpenClaw.
 - **Если Telegram не подключен:** добавьте токен в `~/OpenClawEnvironment/.env` (`TELEGRAM_BOT_TOKEN=...`) и выполните `./install-openclaw.sh telegram`.
 - **При повторном запуске:** инсталлятор перезаписывает конфиги, перезапускает контейнеры и выполняет post-install проверку доступности сервисов.
+
+## Python пакеты
+
+Инсталлятор автоматически настраивает поддержку Python с установкой пакетов:
+
+- **Автоматическая установка:** при первом запуске собирается кастомный образ `openclaw-python:local` с Python и pip3
+- **Persistent storage:** установленные пакеты сохраняются в `~/OpenClawEnvironment/python-packages/`
+- **Управление пакетами:** редактируйте `~/OpenClawEnvironment/config/requirements.txt` и перезапустите контейнеры
+
+### Добавление Python пакетов
+
+1. Отредактируйте `~/OpenClawEnvironment/config/requirements.txt`:
+   ```txt
+   python-docx
+   python-pptx
+   pandas
+   requests
+   ```
+
+2. Перезапустите контейнеры:
+   ```bash
+   cd ~/OpenClawEnvironment
+   docker compose restart
+   ```
+
+Пакеты установятся автоматически при старте и не пропадут при перезапуске.

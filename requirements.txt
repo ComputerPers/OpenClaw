@@ -1,0 +1,10 @@
+# Python packages for OpenClaw
+# Add your required packages here, one per line
+# Example:
+# python-docx
+# python-pptx
+# pandas
+# requests
+
+python-docx
+python-pptx

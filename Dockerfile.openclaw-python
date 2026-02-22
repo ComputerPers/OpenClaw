@@ -1,0 +1,41 @@
+# Custom OpenClaw image with Python support
+FROM ghcr.io/openclaw/openclaw:latest
+
+# Switch to root to install packages
+USER root
+
+# Detect OS and install Python + pip
+RUN set -eux; \
+    if command -v apk >/dev/null 2>&1; then \
+        # Alpine Linux
+        apk add --no-cache \
+            python3 \
+            py3-pip \
+            python3-dev \
+            build-base \
+            su-exec; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+        # Debian/Ubuntu
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+            python3 \
+            python3-pip \
+            python3-dev \
+            build-essential \
+            sudo && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Create directory for Python packages with correct permissions
+RUN mkdir -p /home/node/.local/lib/python-packages && \
+    chown -R node:node /home/node/.local
+
+# Verify installation
+RUN python3 --version && pip3 --version
+
+# Back to node user (will be overridden by docker-compose user: "0:0")
+USER node
+
+# Keep the original entrypoint
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["node"]

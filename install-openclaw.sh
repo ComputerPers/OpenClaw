@@ -9,6 +9,13 @@ ENV_FILE="$TARGET_DIR/.env"
 COMPOSE_FILE="$TARGET_DIR/docker-compose.yml"
 CADDY_DIR="$TARGET_DIR/caddy"
 CADDY_FILE="$CADDY_DIR/Caddyfile"
+DOCKERFILE="$TARGET_DIR/Dockerfile.openclaw-python"
+CUSTOM_IMAGE_NAME="openclaw-python:local"
+
+# GitHub repository settings
+GITHUB_REPO="${OPENCLAW_REPO:-ComputerPers/OpenClaw}"
+GITHUB_BRANCH="${OPENCLAW_BRANCH:-master}"
+GITHUB_RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 usage() {
   cat <<EOF
@@ -447,6 +454,14 @@ EOF
 write_entrypoint_script() {
   local entrypoint_file="$TARGET_DIR/scripts/entrypoint.sh"
 
+  # Try to download from GitHub first
+  if download_file "${GITHUB_RAW_BASE}/entrypoint.sh" "$entrypoint_file" "entrypoint script"; then
+    chmod +x "$entrypoint_file"
+    return 0
+  fi
+
+  # Fallback: create inline
+  echo "Creating entrypoint script inline (fallback)..."
   cat >"$entrypoint_file" <<'ENTRYPOINT_EOF'
 #!/bin/sh
 set -e
@@ -542,6 +557,13 @@ write_requirements_template() {
     return
   fi
 
+  # Try to download from GitHub first
+  if download_file "${GITHUB_RAW_BASE}/requirements.txt" "$requirements_file" "requirements.txt"; then
+    return 0
+  fi
+
+  # Fallback: create inline
+  echo "Creating requirements.txt inline (fallback)..."
   cat >"$requirements_file" <<'REQUIREMENTS_EOF'
 # Python packages for OpenClaw
 # Add your required packages here, one per line
@@ -557,6 +579,122 @@ REQUIREMENTS_EOF
 
   echo "Created requirements.txt template at $requirements_file"
   echo "You can edit this file to add more Python packages."
+}
+
+download_file() {
+  local url="$1"
+  local output="$2"
+  local description="${3:-file}"
+
+  echo "Downloading $description from GitHub..."
+  if curl -fsSL "$url" -o "$output" 2>/dev/null; then
+    echo "✓ Downloaded: $description"
+    return 0
+  else
+    echo "Warning: Failed to download $description from $url" >&2
+    return 1
+  fi
+}
+
+write_dockerfile() {
+  # Try to download from GitHub first
+  if download_file "${GITHUB_RAW_BASE}/Dockerfile.openclaw-python" "$DOCKERFILE" "Dockerfile"; then
+    return 0
+  fi
+
+  # Fallback: create inline
+  echo "Creating Dockerfile inline (fallback)..."
+  cat >"$DOCKERFILE" <<'DOCKERFILE_EOF'
+# Custom OpenClaw image with Python support
+FROM ghcr.io/openclaw/openclaw:latest
+
+# Switch to root to install packages
+USER root
+
+# Detect OS and install Python + pip
+RUN set -eux; \
+    if command -v apk >/dev/null 2>&1; then \
+        apk add --no-cache \
+            python3 \
+            py3-pip \
+            python3-dev \
+            build-base \
+            su-exec; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+            python3 \
+            python3-pip \
+            python3-dev \
+            build-essential \
+            sudo && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Create directory for Python packages with correct permissions
+RUN mkdir -p /home/node/.local/lib/python-packages && \
+    chown -R node:node /home/node/.local
+
+# Verify installation
+RUN python3 --version && pip3 --version
+
+# Back to node user (will be overridden by docker-compose user: "0:0")
+USER node
+DOCKERFILE_EOF
+
+  echo "Created Dockerfile at $DOCKERFILE"
+}
+
+build_python_image() {
+  local base_image="${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}"
+
+  # Check if we need to build the image
+  if docker image inspect "$CUSTOM_IMAGE_NAME" >/dev/null 2>&1; then
+    echo "Custom Python image already exists: $CUSTOM_IMAGE_NAME"
+    return 0
+  fi
+
+  echo
+  echo "================================================================"
+  echo " Building custom OpenClaw image with Python support"
+  echo "================================================================"
+  echo "This is a one-time operation and may take 2-3 minutes."
+  echo "The image includes Python, pip3, and build tools pre-installed."
+  echo
+
+  # Pull base image first
+  echo "Pulling base image: $base_image"
+  docker pull "$base_image" >/dev/null 2>&1 || true
+
+  # Build custom image
+  echo "Building custom image: $CUSTOM_IMAGE_NAME"
+  if docker build -f "$DOCKERFILE" -t "$CUSTOM_IMAGE_NAME" "$TARGET_DIR" 2>&1 | grep -E "Step|Successfully|built|tagged"; then
+    echo
+    echo "✓ Custom image built successfully: $CUSTOM_IMAGE_NAME"
+    return 0
+  else
+    echo "Error: Failed to build custom image" >&2
+    return 1
+  fi
+}
+
+configure_python_image() {
+  # Update .env to use custom image
+  if [[ -f "$ENV_FILE" ]]; then
+    if grep -q "^OPENCLAW_IMAGE=" "$ENV_FILE"; then
+      # Update existing OPENCLAW_IMAGE
+      if ! grep -q "^OPENCLAW_IMAGE=$CUSTOM_IMAGE_NAME" "$ENV_FILE"; then
+        upsert_env "OPENCLAW_IMAGE" "$CUSTOM_IMAGE_NAME"
+        echo "Updated OPENCLAW_IMAGE to use custom Python image"
+      fi
+    else
+      # Add OPENCLAW_IMAGE
+      upsert_env "OPENCLAW_IMAGE" "$CUSTOM_IMAGE_NAME"
+      echo "Set OPENCLAW_IMAGE to custom Python image"
+    fi
+  fi
+
+  export OPENCLAW_IMAGE="$CUSTOM_IMAGE_NAME"
 }
 
 compose_cmd() {
@@ -1035,7 +1173,12 @@ run_install() {
   prompt_telegram_token
   write_entrypoint_script
   write_requirements_template
+  write_dockerfile
   generate_caddyfile
+
+  echo "Checking Python support..."
+  build_python_image
+  configure_python_image
 
   echo "Pulling images..."
   compose_cmd pull
