@@ -33,6 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/ComputerPers/OpenClaw/master/instal
 Если модель не задана, он попросит её ввести; по умолчанию используется `openrouter/google/gemini-3-flash-preview`.
 Telegram-токен скрипт запрашивает напрямую (скрытый ввод); можно просто нажать Enter, чтобы пропустить этот шаг.
 
+Примечание: Caddy по умолчанию тянется с GHCR (`ghcr.io/caddyserver/caddy:2-alpine`), чтобы установка не зависела от доступности Docker Hub.
+
 После этого снова запустите:
 
 ```bash

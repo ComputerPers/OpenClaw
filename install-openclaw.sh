@@ -92,7 +92,7 @@ services:
     entrypoint: ["node", "dist/index.js"]
 
   caddy:
-    image: caddy:2-alpine
+    image: ${CADDY_IMAGE:-ghcr.io/caddyserver/caddy:2-alpine}
     container_name: openclaw-caddy
     depends_on:
       - openclaw-gateway
@@ -114,6 +114,7 @@ write_env_template_if_missing() {
 # Fill required values before first install run.
 
 OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:latest
+CADDY_IMAGE=ghcr.io/caddyserver/caddy:2-alpine
 OPENCLAW_GATEWAY_BIND=lan
 OPENCLAW_GATEWAY_PORT=18789
 
@@ -343,8 +344,9 @@ prompt_telegram_token() {
 generate_caddyfile() {
   local hash_output
   local password_hash
+  local caddy_img="${CADDY_IMAGE:-ghcr.io/caddyserver/caddy:2-alpine}"
 
-  hash_output="$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "${CADDY_PASSWORD}")"
+  hash_output="$(docker run --rm "$caddy_img" caddy hash-password --plaintext "${CADDY_PASSWORD}")"
   password_hash="$(printf '%s\n' "$hash_output" | awk 'END { print $NF }')"
 
   if [[ -z "$password_hash" ]]; then
