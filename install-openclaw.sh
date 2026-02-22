@@ -333,10 +333,11 @@ prompt_telegram_token() {
   case "$answer" in
     y|Y|yes|YES)
       if [[ "$input_fd" -eq 9 ]]; then
-        read -r -u 9 -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
+        read -r -u 9 -s -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
       else
-        read -r -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
+        read -r -s -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
       fi
+      echo
       if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         upsert_env "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
         export TELEGRAM_BOT_TOKEN
