@@ -262,48 +262,36 @@ prompt_required_env_values() {
 
 prompt_openrouter_model() {
   local default_model="openrouter/google/gemini-3-flash-preview"
-  local answer
-  local custom_model=""
+  local input_fd=0
+  local selected_model=""
 
   if [[ -z "${OPENCLAW_MODEL:-}" ]]; then
-    OPENCLAW_MODEL="$default_model"
-    upsert_env "OPENCLAW_MODEL" "$OPENCLAW_MODEL"
-    export OPENCLAW_MODEL
+    selected_model="$default_model"
+  else
+    selected_model="$OPENCLAW_MODEL"
   fi
 
-  local input_fd=0
   if [[ -r /dev/tty ]]; then
     input_fd=9
     exec 9</dev/tty
   elif [[ ! -t 0 ]]; then
+    OPENCLAW_MODEL="$selected_model"
+    upsert_env "OPENCLAW_MODEL" "$OPENCLAW_MODEL"
+    export OPENCLAW_MODEL
     return
   fi
 
   echo
   if [[ "$input_fd" -eq 9 ]]; then
-    read -r -u 9 -p "Use model '${OPENCLAW_MODEL}'? [Y/n]: " answer
+    read -r -u 9 -p "OpenRouter model [${selected_model}]: " OPENCLAW_MODEL
   else
-    read -r -p "Use model '${OPENCLAW_MODEL}'? [Y/n]: " answer
+    read -r -p "OpenRouter model [${selected_model}]: " OPENCLAW_MODEL
   fi
-  case "$answer" in
-    n|N|no|NO)
-      while [[ -z "$custom_model" ]]; do
-        if [[ "$input_fd" -eq 9 ]]; then
-          read -r -u 9 -p "Enter OpenRouter model (e.g. openrouter/google/gemini-3-flash-preview): " custom_model
-        else
-          read -r -p "Enter OpenRouter model (e.g. openrouter/google/gemini-3-flash-preview): " custom_model
-        fi
-        if [[ -z "$custom_model" ]]; then
-          echo "Model value cannot be empty."
-        fi
-      done
-      OPENCLAW_MODEL="$custom_model"
-      upsert_env "OPENCLAW_MODEL" "$OPENCLAW_MODEL"
-      export OPENCLAW_MODEL
-      ;;
-    *)
-      ;;
-  esac
+  if [[ -z "${OPENCLAW_MODEL:-}" ]]; then
+    OPENCLAW_MODEL="$selected_model"
+  fi
+  upsert_env "OPENCLAW_MODEL" "$OPENCLAW_MODEL"
+  export OPENCLAW_MODEL
 
   if [[ "$input_fd" -eq 9 ]]; then
     exec 9<&-
