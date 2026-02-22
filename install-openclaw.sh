@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1249" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1257" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -431,6 +431,38 @@ compose_cmd() {
   docker compose --project-directory "$TARGET_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+try_configure_telegram_channel() {
+  local token="$1"
+  local output=""
+  local rc=0
+  local ch=""
+  local -a candidates=("telegram" "tg" "telegram-bot" "telegram_bot" "telegramBot")
+
+  for ch in "${candidates[@]}"; do
+    set +e
+    output="$(compose_cmd run --rm openclaw-cli channels add --channel "$ch" --token "$token" 2>&1)"
+    rc=$?
+    set -e
+
+    if [[ "$rc" -eq 0 ]]; then
+      echo "Telegram channel configured (channel=$ch)."
+      return 0
+    fi
+
+    if printf '%s\n' "$output" | grep -qiE 'unknown channel|unsupported channel'; then
+      continue
+    fi
+
+    echo "Warning: failed to configure Telegram channel (channel=$ch). Output:" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  done
+
+  echo "Warning: Telegram channel is not available in this OpenClaw build; skipping Telegram setup." >&2
+  echo "Hint: run 'openclaw channels list' to see supported channels, or install/enable the Telegram plugin, then re-run '$SCRIPT_NAME telegram'." >&2
+  return 2
+}
+
 ensure_services_running() {
   local required_services="openclaw-gateway caddy"
   local missing=0
@@ -506,7 +538,7 @@ run_install() {
 
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     echo "Configuring Telegram channel..."
-    compose_cmd run --rm openclaw-cli channels add --channel telegram --token "$TELEGRAM_BOT_TOKEN"
+    try_configure_telegram_channel "$TELEGRAM_BOT_TOKEN" || true
   fi
 
   echo "Restarting gateway to apply final config..."
@@ -543,8 +575,10 @@ run_telegram() {
   fi
 
   echo "Adding Telegram channel..."
-  compose_cmd run --rm openclaw-cli channels add --channel telegram --token "$TELEGRAM_BOT_TOKEN"
-  echo "Telegram channel configured."
+  if ! try_configure_telegram_channel "$TELEGRAM_BOT_TOKEN"; then
+    echo "Error: could not configure Telegram channel in this OpenClaw build." >&2
+    exit 1
+  fi
 }
 
 run_status() {
