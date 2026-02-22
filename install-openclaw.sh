@@ -11,7 +11,7 @@ CADDY_FILE="$CADDY_DIR/Caddyfile"
 usage() {
   cat <<EOF
 Usage:
-  $SCRIPT_NAME install      # create/update files, run OpenClaw + Caddy, onboard OpenRouter, set model
+  $SCRIPT_NAME install      # create/update files, run OpenClaw + Caddy, onboard OpenRouter, set model, prompt Telegram setup
   $SCRIPT_NAME telegram     # connect Telegram bot using TELEGRAM_BOT_TOKEN from .env
   $SCRIPT_NAME status       # show docker compose status
 
@@ -207,6 +207,33 @@ require_env_values() {
   fi
 }
 
+prompt_telegram_token() {
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    return
+  fi
+
+  if [[ ! -t 0 ]]; then
+    return
+  fi
+
+  local answer
+  echo
+  read -r -p "Configure Telegram now? [y/N]: " answer
+  case "$answer" in
+    y|Y|yes|YES)
+      read -r -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
+      if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+        upsert_env "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
+        export TELEGRAM_BOT_TOKEN
+      else
+        echo "Telegram token is empty, skipping Telegram setup."
+      fi
+      ;;
+    *)
+      ;;
+  esac
+}
+
 generate_caddyfile() {
   local hash_output
   local password_hash
@@ -240,6 +267,7 @@ run_install() {
   load_env
   generate_gateway_token_if_empty
   require_env_values
+  prompt_telegram_token
   generate_caddyfile
 
   echo "Pulling images..."
@@ -261,6 +289,11 @@ run_install() {
 
   echo "Setting model: $OPENCLAW_MODEL"
   compose_cmd run --rm openclaw-cli models set "$OPENCLAW_MODEL"
+
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    echo "Configuring Telegram channel..."
+    compose_cmd run --rm openclaw-cli channels add --channel telegram --token "$TELEGRAM_BOT_TOKEN"
+  fi
 
   echo "Restarting gateway to apply final config..."
   compose_cmd restart openclaw-gateway
