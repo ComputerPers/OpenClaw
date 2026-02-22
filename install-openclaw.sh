@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1354" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1410" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -557,25 +557,120 @@ ensure_services_running() {
   fi
 }
 
+check_gateway_direct() {
+  echo "Probing gateway directly inside Docker network..."
+  local i
+  for i in 1 2 3; do
+    if docker exec openclaw-caddy wget -qO /dev/null --timeout=5 \
+        "http://openclaw-gateway:18789/" 2>/dev/null; then
+      echo "Gateway HTTP endpoint is responsive."
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Error: gateway is not responding inside Docker network (openclaw-gateway:18789)." >&2
+  return 1
+}
+
+check_gateway_api() {
+  local port="$1"
+  echo "Probing gateway API health endpoints..."
+  local -a api_endpoints=("/api/health" "/health" "/api/status")
+  local ep http_code
+  for ep in "${api_endpoints[@]}"; do
+    http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        -u "${CADDY_USER}:${CADDY_PASSWORD}" \
+        "http://127.0.0.1:${port}${ep}" 2>/dev/null)" || true
+    if [[ "$http_code" == "200" ]]; then
+      echo "Gateway API endpoint ${ep} returned 200."
+      return 0
+    fi
+  done
+  echo "Info: no known health endpoint found (tried: ${api_endpoints[*]}); skipping API probe."
+  return 0
+}
+
+check_crash_loop() {
+  echo "Checking for crash loops..."
+  local restart_count
+  restart_count="$(docker inspect --format='{{.RestartCount}}' openclaw-gateway 2>/dev/null)" || restart_count="0"
+  if [[ "${restart_count:-0}" -gt 0 ]]; then
+    echo "Error: gateway container has restarted ${restart_count} time(s) — possible crash loop." >&2
+    return 1
+  fi
+  echo "No crash loops detected (restart count: 0)."
+  return 0
+}
+
+check_gateway_logs() {
+  echo "Scanning gateway logs for fatal errors..."
+  local gw_logs
+  gw_logs="$(compose_cmd logs --tail 80 openclaw-gateway 2>&1)" || true
+  local -a fatal_patterns=(
+    "FATAL" "EADDRINUSE" "OOMKilled" "segfault" "panic:"
+    "unhandledRejection" "Cannot find module" "ERR_SOCKET_BAD_PORT"
+  )
+  local pat
+  for pat in "${fatal_patterns[@]}"; do
+    if printf '%s\n' "$gw_logs" | grep -qi "$pat"; then
+      echo "Error: gateway logs contain '${pat}' — the gateway may have crashed." >&2
+      return 1
+    fi
+  done
+  echo "No fatal errors found in gateway logs."
+  return 0
+}
+
+check_gateway_config() {
+  local config_file="$TARGET_DIR/config/openclaw.json"
+  if [[ ! -f "$config_file" ]]; then
+    echo "Warning: openclaw.json not found; skipping config validation." >&2
+    return 0
+  fi
+  echo "Validating gateway config (trusted-proxy auth)..."
+  if ! python3 -c '
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    c = json.load(f)
+gw = c.get("gateway", {})
+auth = gw.get("auth", {})
+mode = auth.get("mode", "")
+if mode != "trusted-proxy":
+    print("Error: gateway.auth.mode is \"" + mode + "\", expected \"trusted-proxy\".", file=sys.stderr)
+    sys.exit(1)
+header = auth.get("trustedProxy", {}).get("userHeader", "")
+if not header:
+    print("Error: gateway.auth.trustedProxy.userHeader is not set.", file=sys.stderr)
+    sys.exit(1)
+proxies = gw.get("trustedProxies", [])
+if not proxies:
+    print("Error: gateway.trustedProxies list is empty.", file=sys.stderr)
+    sys.exit(1)
+print("Gateway config OK: auth=trusted-proxy, header=" + header + ", proxies=" + str(proxies))
+' "$config_file" 2>&1; then
+    echo "Error: gateway config validation failed — browser connections will get 'pairing required'." >&2
+    return 1
+  fi
+  return 0
+}
+
 run_health_checks() {
   local port="${OPENCLAW_GATEWAY_PORT:-18789}"
   local max_attempts=20
   local sleep_s=2
   local attempt=1
+  local failed=0
 
   # Step 1: verify both containers are in running state.
   ensure_services_running
 
   # Step 2: wait for the Caddy HTTP endpoint to respond.
-  # We do NOT probe the gateway WebSocket directly: the gateway requires device pairing for
-  # new CLI connections, so a raw WS connect from openclaw-cli would be rejected with
-  # 1008 "pairing required" even when everything is perfectly healthy. Caddy up + gateway
-  # container running is a sufficient indicator of a successful install.
   echo "Waiting for Caddy endpoint http://127.0.0.1:${port}/ ..."
   while [[ "$attempt" -le "$max_attempts" ]]; do
     if curl -fsS -u "${CADDY_USER}:${CADDY_PASSWORD}" "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
       echo "Caddy endpoint is up."
-      return 0
+      break
     fi
     if [[ "$attempt" -eq "$max_attempts" ]]; then
       echo "Error: Caddy endpoint check failed on http://127.0.0.1:${port}/ after ${max_attempts} attempts." >&2
@@ -586,6 +681,41 @@ run_health_checks() {
     sleep "$sleep_s"
     attempt=$((attempt + 1))
   done
+
+  # Step 3: verify the gateway responds directly inside Docker network (not just Caddy).
+  if ! check_gateway_direct; then
+    dump_compose_diagnostics
+    return 1
+  fi
+
+  # Step 4: try known API/health endpoints.
+  check_gateway_api "$port"
+
+  # Step 5: detect crash loops.
+  if ! check_crash_loop; then
+    dump_compose_diagnostics
+    return 1
+  fi
+
+  # Step 6: scan gateway logs for fatal/crash indicators.
+  if ! check_gateway_logs; then
+    dump_compose_diagnostics
+    return 1
+  fi
+
+  # Step 7: validate gateway config (trusted-proxy auth must be set, otherwise
+  # browser clients will see "disconnected (1008): pairing required").
+  if ! check_gateway_config; then
+    dump_compose_diagnostics
+    failed=1
+  fi
+
+  if [[ "$failed" -ne 0 ]]; then
+    return 1
+  fi
+
+  echo "All health checks passed."
+  return 0
 }
 
 collect_host_ipv4() {
