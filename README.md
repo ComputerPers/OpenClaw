@@ -17,8 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/ComputerPers/OpenClaw/master/instal
 - сгенерирует `OPENCLAW_GATEWAY_TOKEN`, если он не задан;
 - создаст `caddy/Caddyfile` с bcrypt-хешем пароля для Basic Auth;
 - подтянет Docker-образы и запустит контейнеры;
-- выполнит onboarding для OpenRouter и установит модель:
-  - `openrouter/google/gemini-3-flash-preview`;
+- установит модель через OpenRouter (по умолчанию `openrouter/google/gemini-3-flash-preview`) и проверит ключ OpenRouter коротким live-probe;
 - выведет локальный и LAN URL для доступа к админке.
 
 ## Важно при первом запуске

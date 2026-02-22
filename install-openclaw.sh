@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1231"
+INSTALLER_VERSION="220226-1241" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -435,20 +435,11 @@ run_install() {
   compose_cmd down --remove-orphans || true
   compose_cmd up -d openclaw-gateway caddy
 
-  echo "Running OpenRouter onboarding..."
-  compose_cmd run --rm openclaw-cli onboard \
-    --non-interactive \
-    --accept-risk \
-    --mode local \
-    --auth-choice apiKey \
-    --token-provider openrouter \
-    --token "$OPENROUTER_API_KEY" \
-    --gateway-port 18789 \
-    --gateway-bind "${OPENCLAW_GATEWAY_BIND:-lan}" \
-    --skip-skills
-
-  echo "Setting model: $OPENCLAW_MODEL"
+  echo "Configuring OpenRouter model: $OPENCLAW_MODEL"
   compose_cmd run --rm openclaw-cli models set "$OPENCLAW_MODEL"
+
+  echo "Verifying OpenRouter auth (small live probe)..."
+  compose_cmd run --rm openclaw-cli models status --probe --probe-provider openrouter --probe-max-tokens 8 --plain >/dev/null
 
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     echo "Configuring Telegram channel..."
