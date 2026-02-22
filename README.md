@@ -30,6 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/ComputerPers/OpenClaw/master/instal
 
 Инсталлятор также умеет сам запросить эти значения интерактивно при первом запуске.
 При установке он опционально предлагает выбрать модель OpenRouter; по умолчанию используется `openrouter/google/gemini-3-flash-preview`.
+Telegram-токен скрипт запрашивает напрямую (скрытый ввод); можно просто нажать Enter, чтобы пропустить этот шаг.
 
 После этого снова запустите:
 

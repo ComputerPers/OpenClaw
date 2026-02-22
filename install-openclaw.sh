@@ -323,31 +323,20 @@ prompt_telegram_token() {
     return
   fi
 
-  local answer
   echo
+  echo "Telegram setup (optional): press Enter to skip."
   if [[ "$input_fd" -eq 9 ]]; then
-    read -r -u 9 -p "Configure Telegram now? [y/N]: " answer
+    read -r -u 9 -s -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
   else
-    read -r -p "Configure Telegram now? [y/N]: " answer
+    read -r -s -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
   fi
-  case "$answer" in
-    y|Y|yes|YES)
-      if [[ "$input_fd" -eq 9 ]]; then
-        read -r -u 9 -s -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
-      else
-        read -r -s -p "Enter TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
-      fi
-      echo
-      if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-        upsert_env "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
-        export TELEGRAM_BOT_TOKEN
-      else
-        echo "Telegram token is empty, skipping Telegram setup."
-      fi
-      ;;
-    *)
-      ;;
-  esac
+  echo
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    upsert_env "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
+    export TELEGRAM_BOT_TOKEN
+  else
+    echo "Telegram token is empty, skipping Telegram setup."
+  fi
 
   if [[ "$input_fd" -eq 9 ]]; then
     exec 9<&-
