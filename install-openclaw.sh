@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1434" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1450" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -14,6 +14,7 @@ usage() {
   cat <<EOF
 Usage:
   $SCRIPT_NAME install      # create/update files, run OpenClaw + Caddy, onboard OpenRouter, set model, prompt Telegram setup
+  $SCRIPT_NAME approve      # approve a pending device (run after opening the dashboard in browser)
   $SCRIPT_NAME telegram     # connect Telegram bot using TELEGRAM_BOT_TOKEN from .env
   $SCRIPT_NAME status       # show docker compose status
 
@@ -702,6 +703,54 @@ print("Gateway config OK: auth=trusted-proxy, header=" + header
   return 0
 }
 
+gateway_exec_cli() {
+  # Run an openclaw CLI command inside the gateway container via loopback.
+  # Loopback connections are auto-approved by the gateway — no pairing needed.
+  docker exec -u node openclaw-gateway \
+    node dist/index.js "$@" \
+    --url "ws://127.0.0.1:18789" \
+    --token "${OPENCLAW_GATEWAY_TOKEN}"
+}
+
+auto_approve_devices() {
+  # Docker NAT makes browser connections appear non-local (172.18.x.x instead
+  # of 127.0.0.1), so the gateway's auto-approval never fires and the browser
+  # gets "pairing required" (1008). This loop runs inside the gateway container
+  # via loopback and auto-approves pending device requests as they appear.
+  local duration_s="${1:-120}"
+  local interval_s=3
+  local elapsed=0
+
+  echo "Starting device auto-approval (${duration_s}s window)..."
+  echo "Open the dashboard in your browser — the device will be approved automatically."
+
+  while [[ "$elapsed" -lt "$duration_s" ]]; do
+    if gateway_exec_cli devices approve --latest >/dev/null 2>&1; then
+      echo "Device approved successfully."
+      return 0
+    fi
+    sleep "$interval_s"
+    elapsed=$((elapsed + interval_s))
+  done
+
+  echo "Warning: no pending device requests appeared within ${duration_s}s." >&2
+  echo "Hint: open the dashboard, then run: $SCRIPT_NAME approve" >&2
+  return 1
+}
+
+run_approve() {
+  load_env
+  echo "Approving the latest pending device..."
+  if gateway_exec_cli devices approve --latest 2>&1; then
+    echo "Device approved. Refresh the dashboard."
+  else
+    echo "Listing pending devices..."
+    gateway_exec_cli devices list 2>&1 || true
+    echo
+    echo "No pending devices found. Open the dashboard first, then re-run: $SCRIPT_NAME approve"
+  fi
+}
+
 run_health_checks() {
   local port="${OPENCLAW_GATEWAY_PORT:-18789}"
   local max_attempts=20
@@ -840,23 +889,34 @@ run_install() {
     echo "Warning: post-install checks failed. OpenClaw may still be running; see diagnostics above." >&2
   fi
 
+  local port="${OPENCLAW_GATEWAY_PORT:-18789}"
   echo
   echo "================================================================"
-  echo " OpenClaw is up."
+  echo " OpenClaw is up.  Open the dashboard to complete setup."
   echo "================================================================"
   echo
   echo "Access URLs (IPv4):"
-  echo "  http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/"
+  echo "  http://localhost:${port}/"
   while IFS= read -r ipv4; do
     [[ -z "$ipv4" ]] && continue
-    echo "  http://${ipv4}:${OPENCLAW_GATEWAY_PORT:-18789}/"
+    echo "  http://${ipv4}:${port}/"
   done < <(collect_host_ipv4)
   echo
   echo "Login (Basic Auth):"
   echo "  Username: ${CADDY_USER}"
   echo "  Password: value from ${ENV_FILE} -> CADDY_PASSWORD"
   echo
-  echo "The gateway token is injected automatically by the proxy — no manual setup needed."
+  echo "================================================================"
+  echo
+
+  # Auto-approve the browser device. Docker NAT prevents auto-approval, so we
+  # run a loopback-based approval loop while the user opens the dashboard.
+  auto_approve_devices 120 || true
+
+  echo
+  echo "================================================================"
+  echo "If you see 'pairing required' later, run:"
+  echo "  $SCRIPT_NAME approve"
   echo "================================================================"
 }
 
@@ -898,6 +958,9 @@ main() {
   case "$action" in
     install)
       run_install
+      ;;
+    approve)
+      run_approve
       ;;
     telegram)
       run_telegram
