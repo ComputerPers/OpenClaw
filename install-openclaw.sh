@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1342" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1354" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -484,21 +484,47 @@ try_configure_telegram_channel() {
 
 configure_trusted_proxy_auth() {
   # Use trusted-proxy auth so the browser never needs to know the gateway token.
-  # Caddy authenticates users via Basic Auth and passes identity in X-Forwarded-User.
-  # Gateway trusts requests from the Docker network (172.16.0.0/12 covers all default
-  # Docker subnets) and grants access based on the header value.
-  #
-  # Uses a Node.js one-liner to patch openclaw.json atomically because
-  # `openclaw config set` does not support array values (trustedProxies).
+  # Caddy authenticates users via Basic Auth and injects X-Forwarded-User into every
+  # proxied request. The gateway trusts Caddy (172.16.0.0/12 = all Docker subnets)
+  # and uses the header value as the user identity — no browser token entry needed.
+  local config_file="$TARGET_DIR/config/openclaw.json"
   local docker_subnet="172.16.0.0/12"
+
+  if [[ ! -f "$config_file" ]]; then
+    echo "Warning: openclaw.json not found at $config_file; skipping trusted-proxy auth." >&2
+    return 1
+  fi
+
   echo "Configuring gateway trusted-proxy auth..."
-  compose_cmd run --rm --entrypoint node openclaw-cli \
-    -e "var fs=require('fs'),p='/home/node/.openclaw/openclaw.json',c=JSON.parse(fs.readFileSync(p,'utf8'));c.gateway=c.gateway||{};c.gateway.auth={mode:'trusted-proxy',trustedProxy:{userHeader:'x-forwarded-user'}};c.gateway.trustedProxies=['${docker_subnet}'];fs.writeFileSync(p,JSON.stringify(c,null,2));console.log('Gateway trusted-proxy auth configured.');" \
-    || {
-      echo "Warning: failed to configure trusted-proxy auth via node; falling back to config set." >&2
-      compose_cmd run --rm openclaw-cli config set gateway.auth.mode trusted-proxy || true
-      compose_cmd run --rm openclaw-cli config set gateway.auth.trustedProxy.userHeader x-forwarded-user || true
+
+  # Patch openclaw.json directly on the host via Python3 (standard on macOS/Linux).
+  # Python args (path, subnet) avoid any quoting/escaping issues with shell variables.
+  if python3 -c '
+import json, sys
+path, subnet = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        c = json.load(f)
+    c.setdefault("gateway", {})
+    c["gateway"]["auth"] = {
+        "mode": "trusted-proxy",
+        "trustedProxy": {"userHeader": "x-forwarded-user"}
     }
+    c["gateway"]["trustedProxies"] = [subnet]
+    with open(path, "w") as f:
+        json.dump(c, f, indent=2)
+    print("Gateway trusted-proxy auth configured.")
+except Exception as e:
+    print("Error:", e, file=sys.stderr)
+    sys.exit(1)
+' "$config_file" "$docker_subnet"; then
+    return 0
+  fi
+
+  # Fallback: use openclaw config set (no array support, partial config only).
+  echo "Warning: Python3 config patch failed; using config set fallback (no trustedProxies)." >&2
+  compose_cmd run --rm openclaw-cli config set gateway.auth.mode trusted-proxy || true
+  compose_cmd run --rm openclaw-cli config set gateway.auth.trustedProxy.userHeader x-forwarded-user || true
 }
 
 dump_compose_diagnostics() {
