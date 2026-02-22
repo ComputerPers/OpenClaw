@@ -92,7 +92,7 @@ services:
     entrypoint: ["node", "dist/index.js"]
 
   caddy:
-    image: ${CADDY_IMAGE:-ghcr.io/caddyserver/caddy:2-alpine}
+    image: ${CADDY_IMAGE:-caddy:2-alpine}
     container_name: openclaw-caddy
     depends_on:
       - openclaw-gateway
@@ -114,7 +114,10 @@ write_env_template_if_missing() {
 # Fill required values before first install run.
 
 OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:latest
-CADDY_IMAGE=ghcr.io/caddyserver/caddy:2-alpine
+# Caddy image registry fallback:
+# - default: caddy:2-alpine (Docker Hub)
+# - alternative: ghcr.io/caddyserver/caddy:2-alpine (GHCR)
+CADDY_IMAGE=caddy:2-alpine
 OPENCLAW_GATEWAY_BIND=lan
 OPENCLAW_GATEWAY_PORT=18789
 
@@ -341,10 +344,70 @@ prompt_telegram_token() {
   fi
 }
 
+docker_pull_try() {
+  local image="$1"
+  local attempts="${2:-3}"
+  local sleep_s="${3:-2}"
+
+  local i=1
+  while [[ "$i" -le "$attempts" ]]; do
+    if docker pull "$image" >/dev/null; then
+      return 0
+    fi
+    echo "Warning: failed to pull $image (attempt $i/$attempts)" >&2
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+resolve_caddy_image() {
+  local candidate_images=()
+  local img=""
+
+  # Prefer user-specified image if present.
+  if [[ -n "${CADDY_IMAGE:-}" ]]; then
+    candidate_images+=("$CADDY_IMAGE")
+  fi
+
+  # Known public mirrors.
+  candidate_images+=(
+    "caddy:2-alpine"
+    "docker.io/library/caddy:2-alpine"
+    "ghcr.io/caddyserver/caddy:2-alpine"
+  )
+
+  for img in "${candidate_images[@]}"; do
+    # If already present locally, use it.
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      CADDY_IMAGE="$img"
+      upsert_env "CADDY_IMAGE" "$CADDY_IMAGE"
+      export CADDY_IMAGE
+      return 0
+    fi
+
+    if docker_pull_try "$img" 2 2; then
+      CADDY_IMAGE="$img"
+      upsert_env "CADDY_IMAGE" "$CADDY_IMAGE"
+      export CADDY_IMAGE
+      return 0
+    fi
+  done
+
+  echo "Error: could not pull any Caddy image." >&2
+  echo "Tried:" >&2
+  printf '  - %s\n' "${candidate_images[@]}" >&2
+  echo "Hint: set CADDY_IMAGE in $ENV_FILE to a reachable registry and re-run." >&2
+  return 1
+}
+
 generate_caddyfile() {
   local hash_output
   local password_hash
-  local caddy_img="${CADDY_IMAGE:-ghcr.io/caddyserver/caddy:2-alpine}"
+  local caddy_img=""
+
+  resolve_caddy_image
+  caddy_img="${CADDY_IMAGE}"
 
   hash_output="$(docker run --rm "$caddy_img" caddy hash-password --plaintext "${CADDY_PASSWORD}")"
   password_hash="$(printf '%s\n' "$hash_output" | awk 'END { print $NF }')"
