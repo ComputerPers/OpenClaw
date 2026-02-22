@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1424" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1434" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -484,10 +484,6 @@ try_configure_telegram_channel() {
 }
 
 configure_trusted_proxy_auth() {
-  # Use trusted-proxy auth so the browser never needs to know the gateway token.
-  # Caddy authenticates users via Basic Auth and injects X-Forwarded-User into every
-  # proxied request. The gateway trusts Caddy (172.16.0.0/12 = all Docker subnets)
-  # and uses the header value as the user identity — no browser token entry needed.
   local config_file="$TARGET_DIR/config/openclaw.json"
   local docker_subnet="172.16.0.0/12"
 
@@ -496,25 +492,35 @@ configure_trusted_proxy_auth() {
     return 1
   fi
 
-  echo "Configuring gateway trusted-proxy auth..."
+  echo "Configuring gateway auth for reverse-proxy deployment..."
 
-  # Patch openclaw.json directly on the host via Python3 (standard on macOS/Linux).
-  # Python args (path, subnet) avoid any quoting/escaping issues with shell variables.
   if python3 -c '
 import json, sys
 path, subnet = sys.argv[1], sys.argv[2]
 try:
     with open(path) as f:
         c = json.load(f)
-    c.setdefault("gateway", {})
-    c["gateway"]["auth"] = {
+    gw = c.setdefault("gateway", {})
+
+    # Trusted-proxy auth: Caddy authenticates users via Basic Auth and injects
+    # X-Forwarded-User. The gateway trusts Caddy (Docker subnet) and uses the
+    # header value as user identity.
+    gw["auth"] = {
         "mode": "trusted-proxy",
         "trustedProxy": {"userHeader": "x-forwarded-user"}
     }
-    c["gateway"]["trustedProxies"] = [subnet]
+    gw["trustedProxies"] = [subnet]
+
+    # Allow Control UI without device pairing (issue #4941).
+    # Docker NAT makes connections appear non-local, so auto-approval never fires.
+    # Non-localhost HTTP origins also lack Secure Context for the device identity
+    # handshake (Web Crypto API blocked). allowInsecureAuth bypasses both.
+    # Security is handled by Caddy Basic Auth in front of the gateway.
+    gw.setdefault("controlUi", {})["allowInsecureAuth"] = True
+
     with open(path, "w") as f:
         json.dump(c, f, indent=2)
-    print("Gateway trusted-proxy auth configured.")
+    print("Gateway auth configured (trusted-proxy + allowInsecureAuth).")
 except Exception as e:
     print("Error:", e, file=sys.stderr)
     sys.exit(1)
@@ -522,10 +528,10 @@ except Exception as e:
     return 0
   fi
 
-  # Fallback: use openclaw config set (no array support, partial config only).
-  echo "Warning: Python3 config patch failed; using config set fallback (no trustedProxies)." >&2
+  echo "Warning: Python3 config patch failed; using config set fallback." >&2
   compose_cmd run --rm openclaw-cli config set gateway.auth.mode trusted-proxy || true
   compose_cmd run --rm openclaw-cli config set gateway.auth.trustedProxy.userHeader x-forwarded-user || true
+  compose_cmd run --rm openclaw-cli config set gateway.controlUi.allowInsecureAuth true || true
 }
 
 dump_compose_diagnostics() {
@@ -656,29 +662,41 @@ check_gateway_config() {
     echo "Warning: openclaw.json not found; skipping config validation." >&2
     return 0
   fi
-  echo "Validating gateway config (trusted-proxy auth)..."
+  echo "Validating gateway config..."
   if ! python3 -c '
 import json, sys
 path = sys.argv[1]
+errors = []
 with open(path) as f:
     c = json.load(f)
 gw = c.get("gateway", {})
+
 auth = gw.get("auth", {})
 mode = auth.get("mode", "")
 if mode != "trusted-proxy":
-    print("Error: gateway.auth.mode is \"" + mode + "\", expected \"trusted-proxy\".", file=sys.stderr)
-    sys.exit(1)
+    errors.append("gateway.auth.mode is \"" + mode + "\", expected \"trusted-proxy\"")
 header = auth.get("trustedProxy", {}).get("userHeader", "")
 if not header:
-    print("Error: gateway.auth.trustedProxy.userHeader is not set.", file=sys.stderr)
-    sys.exit(1)
+    errors.append("gateway.auth.trustedProxy.userHeader is not set")
 proxies = gw.get("trustedProxies", [])
 if not proxies:
-    print("Error: gateway.trustedProxies list is empty.", file=sys.stderr)
+    errors.append("gateway.trustedProxies list is empty")
+
+ui = gw.get("controlUi", {})
+if not ui.get("allowInsecureAuth"):
+    errors.append("gateway.controlUi.allowInsecureAuth is not true — Docker NAT "
+                  "clients will get \"pairing required\" and non-localhost HTTP "
+                  "clients will fail device identity handshake")
+
+if errors:
+    for e in errors:
+        print("Error: " + e, file=sys.stderr)
     sys.exit(1)
-print("Gateway config OK: auth=trusted-proxy, header=" + header + ", proxies=" + str(proxies))
+
+print("Gateway config OK: auth=trusted-proxy, header=" + header
+      + ", proxies=" + str(proxies) + ", allowInsecureAuth=true")
 ' "$config_file" 2>&1; then
-    echo "Error: gateway config validation failed — browser connections will get 'pairing required'." >&2
+    echo "Error: gateway config validation failed." >&2
     return 1
   fi
   return 0
