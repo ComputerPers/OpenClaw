@@ -51,3 +51,9 @@ Telegram-токен скрипт запрашивает напрямую (скр
 ```bash
 ./install-openclaw.sh telegram
 ```
+
+## Как начать работать после установки
+
+- **Через Web UI:** откройте `http://localhost:18789` (или `http://<IP_вашего_Mac>:18789` из LAN), пройдите Basic Auth, затем в Dashboard подключитесь к Gateway.
+- **Через Telegram:** если токен задан, просто напишите вашему боту в Telegram и начните диалог с OpenClaw.
+- **Если Telegram не подключен:** добавьте токен в `~/OpenClawEnvironment/.env` (`TELEGRAM_BOT_TOKEN=...`) и выполните `./install-openclaw.sh telegram`.

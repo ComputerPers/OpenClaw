@@ -357,6 +357,21 @@ compose_cmd() {
   docker compose --project-directory "$TARGET_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+collect_host_ipv4() {
+  if ! command -v ifconfig >/dev/null 2>&1; then
+    return
+  fi
+
+  ifconfig | awk '
+    /inet / {
+      ip = $2
+      if (ip !~ /^127\./) {
+        print ip
+      }
+    }
+  ' | awk '!seen[$0]++'
+}
+
 run_install() {
   ensure_dirs
   write_compose
@@ -397,24 +412,16 @@ run_install() {
   echo "Restarting gateway to apply final config..."
   compose_cmd restart openclaw-gateway
 
-  local host_ip
-  host_ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
-  if [[ -z "$host_ip" ]]; then
-    host_ip="$(ipconfig getifaddr en1 2>/dev/null || true)"
-  fi
-
   echo
   echo "OpenClaw is up."
-  echo "Local URL: http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/"
-  if [[ -n "$host_ip" ]]; then
-    echo "LAN URL:   http://${host_ip}:${OPENCLAW_GATEWAY_PORT:-18789}/"
-  else
-    echo "LAN URL:   http://<your-mac-ip>:${OPENCLAW_GATEWAY_PORT:-18789}/"
-  fi
+  echo "Access URLs (IPv4):"
+  echo "  http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/"
+  while IFS= read -r ipv4; do
+    [[ -z "$ipv4" ]] && continue
+    echo "  http://${ipv4}:${OPENCLAW_GATEWAY_PORT:-18789}/"
+  done < <(collect_host_ipv4)
   echo
-  echo "If needed, find your LAN IP with:"
-  echo "  ipconfig getifaddr en0"
-  echo "  ipconfig getifaddr en1"
+  echo "These URLs use all non-loopback IPv4 addresses found on this host."
 }
 
 run_telegram() {
