@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1459" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1630" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -486,6 +486,7 @@ try_configure_telegram_channel() {
 
 configure_gateway_auth() {
   local config_file="$TARGET_DIR/config/openclaw.json"
+  local docker_subnet="172.16.0.0/12"
 
   if [[ ! -f "$config_file" ]]; then
     echo "Warning: openclaw.json not found at $config_file; skipping auth config." >&2
@@ -494,47 +495,42 @@ configure_gateway_auth() {
 
   echo "Configuring gateway auth for Docker reverse-proxy deployment..."
 
-  # We intentionally do NOT use auth.mode="trusted-proxy" because of bug #17761:
-  # trusted-proxy mode early-returns in the auth dispatcher and blocks ALL internal
-  # services (CLI, node host, bridges) that connect via loopback — they can't fall
-  # back to token/password auth. This breaks device approval from inside the container.
+  # trusted-proxy mode: Caddy authenticates users (Basic Auth) and injects
+  # X-Forwarded-User. The gateway trusts Caddy by IP and uses the header as
+  # user identity — no gateway token needed in the browser.
   #
-  # Instead we rely on the default token auth mode. Caddy injects the gateway token
-  # as Authorization: Bearer for upstream HTTP/WS requests, and the CLI uses --token
-  # for direct loopback connections.
+  # Note on bug #17761: trusted-proxy early-returns for non-proxy IPs without
+  # fallback to token auth. To work around this, internal CLI commands route
+  # through Caddy (see gateway_exec_cli) so they also get X-Forwarded-User.
   if python3 -c '
 import json, sys
-path = sys.argv[1]
+path, subnet = sys.argv[1], sys.argv[2]
 try:
     with open(path) as f:
         c = json.load(f)
     gw = c.setdefault("gateway", {})
 
-    # Remove trusted-proxy mode if previously set (installer upgrade path).
-    auth = gw.get("auth", {})
-    if auth.get("mode") == "trusted-proxy":
-        del auth["mode"]
-        auth.pop("trustedProxy", None)
-        gw["auth"] = auth
-    gw.pop("trustedProxies", None)
+    gw["auth"] = {
+        "mode": "trusted-proxy",
+        "trustedProxy": {"userHeader": "x-forwarded-user"}
+    }
+    gw["trustedProxies"] = [subnet]
 
-    # Allow Control UI without device pairing handshake (issue #4941).
-    # Docker NAT makes connections appear non-local; non-localhost HTTP origins
-    # lack Secure Context for the Web Crypto device identity flow.
-    # Security is handled by Caddy Basic Auth in front of the gateway.
     gw.setdefault("controlUi", {})["allowInsecureAuth"] = True
 
     with open(path, "w") as f:
         json.dump(c, f, indent=2)
-    print("Gateway auth configured (token mode + allowInsecureAuth).")
+    print("Gateway auth configured (trusted-proxy + allowInsecureAuth).")
 except Exception as e:
     print("Error:", e, file=sys.stderr)
     sys.exit(1)
-' "$config_file"; then
+' "$config_file" "$docker_subnet"; then
     return 0
   fi
 
   echo "Warning: Python3 config patch failed; using config set fallback." >&2
+  compose_cmd run --rm openclaw-cli config set gateway.auth.mode trusted-proxy || true
+  compose_cmd run --rm openclaw-cli config set gateway.auth.trustedProxy.userHeader x-forwarded-user || true
   compose_cmd run --rm openclaw-cli config set gateway.controlUi.allowInsecureAuth true || true
 }
 
@@ -677,23 +673,26 @@ gw = c.get("gateway", {})
 
 auth = gw.get("auth", {})
 mode = auth.get("mode", "")
-if mode == "trusted-proxy":
-    errors.append("gateway.auth.mode is still \"trusted-proxy\" — this blocks "
-                  "internal CLI connections (bug #17761). Remove it to use "
-                  "default token auth.")
+if mode != "trusted-proxy":
+    errors.append("gateway.auth.mode is \"" + mode + "\", expected \"trusted-proxy\"")
+header = auth.get("trustedProxy", {}).get("userHeader", "")
+if not header:
+    errors.append("gateway.auth.trustedProxy.userHeader is not set")
+proxies = gw.get("trustedProxies", [])
+if not proxies:
+    errors.append("gateway.trustedProxies list is empty")
 
 ui = gw.get("controlUi", {})
 if not ui.get("allowInsecureAuth"):
-    errors.append("gateway.controlUi.allowInsecureAuth is not true — Docker NAT "
-                  "clients will get \"pairing required\" and non-localhost HTTP "
-                  "clients will fail device identity handshake")
+    errors.append("gateway.controlUi.allowInsecureAuth is not true")
 
 if errors:
     for e in errors:
         print("Error: " + e, file=sys.stderr)
     sys.exit(1)
 
-print("Gateway config OK: auth=token (default), allowInsecureAuth=true")
+print("Gateway config OK: auth=trusted-proxy, header=" + header
+      + ", proxies=" + str(proxies) + ", allowInsecureAuth=true")
 ' "$config_file" 2>&1; then
     echo "Error: gateway config validation failed." >&2
     return 1
@@ -702,17 +701,21 @@ print("Gateway config OK: auth=token (default), allowInsecureAuth=true")
 }
 
 gateway_exec_cli() {
-  # Run an openclaw CLI command inside the gateway container via loopback.
-  # Loopback connections are auto-approved by the gateway — no pairing needed.
+  # Run an openclaw CLI command THROUGH CADDY so the request gets
+  # X-Forwarded-User from Basic Auth — required for trusted-proxy auth.
   #
-  # IMPORTANT: We use a temp HOME so the CLI gets a fresh device identity instead
-  # of reading stale device tokens from the gateway's shared config volume
-  # (/home/node/.openclaw). Reusing the gateway's identity causes
-  # "device_token_mismatch" because the gateway and CLI would clash.
+  # Bug #17761: trusted-proxy mode blocks direct connections (loopback) that
+  # don't go through the proxy. Routing CLI through Caddy works around this.
+  #
+  # We URL-encode the password to handle special characters in the WS URL.
+  # Clean HOME avoids stale device tokens from the shared config volume.
+  local encoded_pass
+  encoded_pass="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=""))' "${CADDY_PASSWORD}")"
+
   docker exec -u node openclaw-gateway \
     env HOME=/tmp/openclaw-cli-approve \
     node dist/index.js "$@" \
-    --url "ws://127.0.0.1:18789" \
+    --url "ws://${CADDY_USER}:${encoded_pass}@caddy:18789" \
     --token "${OPENCLAW_GATEWAY_TOKEN}"
 }
 
@@ -809,7 +812,7 @@ run_health_checks() {
     return 1
   fi
 
-  # Step 8: validate gateway config (allowInsecureAuth, no stale trusted-proxy mode).
+  # Step 8: validate gateway config (trusted-proxy auth + allowInsecureAuth).
   if ! check_gateway_config; then
     dump_compose_diagnostics
     failed=1
