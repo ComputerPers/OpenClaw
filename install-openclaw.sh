@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1649" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1652" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -769,7 +769,7 @@ run_pairing_approve_telegram() {
   fi
   load_env
   echo "Approving Telegram pairing code: $code"
-  gateway_exec_cli pairing approve telegram "$code" 2>&1
+  compose_cmd run --rm openclaw-cli pairing approve telegram "$code" 2>&1
 }
 
 run_health_checks() {
