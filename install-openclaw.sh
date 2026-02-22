@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1410" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1424" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -100,7 +100,7 @@ services:
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "0.0.0.0:${OPENCLAW_GATEWAY_PORT:-18789}:18789"
     restart: unless-stopped
 EOF
 }
@@ -425,6 +425,7 @@ generate_caddyfile() {
   }
   reverse_proxy openclaw-gateway:18789 {
     header_up X-Forwarded-User {http.auth.user.id}
+    header_up Authorization "Bearer ${OPENCLAW_GATEWAY_TOKEN}"
   }
 }
 EOF
@@ -576,7 +577,7 @@ check_gateway_api() {
   local port="$1"
   echo "Probing gateway API health endpoints..."
   local -a api_endpoints=("/api/health" "/health" "/api/status")
-  local ep http_code
+  local ep http_code body
   for ep in "${api_endpoints[@]}"; do
     http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
         -u "${CADDY_USER}:${CADDY_PASSWORD}" \
@@ -587,6 +588,34 @@ check_gateway_api() {
     fi
   done
   echo "Info: no known health endpoint found (tried: ${api_endpoints[*]}); skipping API probe."
+  return 0
+}
+
+check_gateway_auth() {
+  local port="$1"
+  echo "Verifying gateway accepts authenticated requests through Caddy..."
+  local http_code body
+  http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+      -u "${CADDY_USER}:${CADDY_PASSWORD}" \
+      "http://127.0.0.1:${port}/api/health" 2>/dev/null)" || true
+  if [[ "$http_code" == "401" || "$http_code" == "403" ]]; then
+    echo "Error: gateway returned ${http_code} through Caddy — token injection may be broken." >&2
+    echo "Hint: verify that the Caddyfile contains 'header_up Authorization \"Bearer ...\"'." >&2
+    return 1
+  fi
+
+  # Probe the gateway directly with Bearer token (bypass Caddy) to isolate the issue.
+  local direct_code
+  direct_code="$(docker exec openclaw-caddy wget -qS -O /dev/null \
+      --header='Authorization: Bearer '"${OPENCLAW_GATEWAY_TOKEN}" \
+      "http://openclaw-gateway:18789/api/health" 2>&1 \
+      | awk '/HTTP\//{print $2}' | tail -1)" || true
+  if [[ "$direct_code" == "401" || "$direct_code" == "403" ]]; then
+    echo "Error: gateway rejected Bearer token directly (HTTP ${direct_code}) — token mismatch." >&2
+    echo "Hint: OPENCLAW_GATEWAY_TOKEN in .env must match the token the gateway was started with." >&2
+    return 1
+  fi
+  echo "Gateway auth check passed."
   return 0
 }
 
@@ -691,19 +720,25 @@ run_health_checks() {
   # Step 4: try known API/health endpoints.
   check_gateway_api "$port"
 
-  # Step 5: detect crash loops.
+  # Step 5: verify gateway accepts authenticated requests (Bearer token through Caddy).
+  if ! check_gateway_auth "$port"; then
+    dump_compose_diagnostics
+    failed=1
+  fi
+
+  # Step 6: detect crash loops.
   if ! check_crash_loop; then
     dump_compose_diagnostics
     return 1
   fi
 
-  # Step 6: scan gateway logs for fatal/crash indicators.
+  # Step 7: scan gateway logs for fatal/crash indicators.
   if ! check_gateway_logs; then
     dump_compose_diagnostics
     return 1
   fi
 
-  # Step 7: validate gateway config (trusted-proxy auth must be set, otherwise
+  # Step 8: validate gateway config (trusted-proxy auth must be set, otherwise
   # browser clients will see "disconnected (1008): pairing required").
   if ! check_gateway_config; then
     dump_compose_diagnostics
@@ -764,7 +799,6 @@ run_install() {
   # eth0), not just loopback. Without this the CLI container can't reach the gateway by Docker
   # service name, causing health checks to fail with WS 1006.
   compose_cmd run --rm openclaw-cli config set gateway.bind lan || true
-  configure_trusted_proxy_auth
 
   echo "Verifying OpenRouter auth (small live probe)..."
   compose_cmd run --rm openclaw-cli models status --probe --probe-provider openrouter --probe-max-tokens 8 >/dev/null
@@ -773,6 +807,10 @@ run_install() {
     echo "Configuring Telegram channel..."
     try_configure_telegram_channel "$TELEGRAM_BOT_TOKEN" || true
   fi
+
+  # Must run AFTER all openclaw-cli config set commands — the CLI may overwrite the JSON
+  # and drop fields it doesn't know about (gateway.auth, gateway.trustedProxies).
+  configure_trusted_proxy_auth
 
   echo "Restarting gateway to apply final config..."
   compose_cmd restart openclaw-gateway
