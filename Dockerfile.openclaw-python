@@ -35,7 +35,3 @@ RUN python3 --version && pip3 --version
 
 # Back to node user (will be overridden by docker-compose user: "0:0")
 USER node
-
-# Keep the original entrypoint
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["node"]

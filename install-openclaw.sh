@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1745" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1751" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -640,6 +640,7 @@ RUN python3 --version && pip3 --version
 
 # Back to node user (will be overridden by docker-compose user: "0:0")
 USER node
+
 DOCKERFILE_EOF
 
   echo "Created Dockerfile at $DOCKERFILE"
@@ -668,12 +669,28 @@ build_python_image() {
 
   # Build custom image
   echo "Building custom image: $CUSTOM_IMAGE_NAME"
-  if docker build -f "$DOCKERFILE" -t "$CUSTOM_IMAGE_NAME" "$TARGET_DIR" 2>&1 | grep -E "Step|Successfully|built|tagged"; then
+  echo "Using Dockerfile: $DOCKERFILE"
+  echo
+
+  local build_log
+  build_log=$(mktemp)
+
+  if docker build -f "$DOCKERFILE" -t "$CUSTOM_IMAGE_NAME" "$TARGET_DIR" >"$build_log" 2>&1; then
+    # Success - show summary
+    grep -E "Step|Successfully|built|tagged" "$build_log" || cat "$build_log"
+    rm -f "$build_log"
     echo
     echo "✓ Custom image built successfully: $CUSTOM_IMAGE_NAME"
     return 0
   else
+    # Failure - show full log
     echo "Error: Failed to build custom image" >&2
+    echo "Full build log:" >&2
+    cat "$build_log" >&2
+    rm -f "$build_log"
+    echo >&2
+    echo "Dockerfile location: $DOCKERFILE" >&2
+    echo "Build context: $TARGET_DIR" >&2
     return 1
   fi
 }
