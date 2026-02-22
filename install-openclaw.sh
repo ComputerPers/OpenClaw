@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="220226-1244" #ddMMYY-HHmm
+INSTALLER_VERSION="220226-1249" #ddMMYY-HHmm
 
 SCRIPT_NAME="$(basename "$0")"
 TARGET_DIR="${OPENCLAW_ENV_DIR:-$HOME/OpenClawEnvironment}"
@@ -502,7 +502,7 @@ run_install() {
   compose_cmd run --rm openclaw-cli models set "$OPENCLAW_MODEL"
 
   echo "Verifying OpenRouter auth (small live probe)..."
-  compose_cmd run --rm openclaw-cli models status --probe --probe-provider openrouter --probe-max-tokens 8 --plain >/dev/null
+  compose_cmd run --rm openclaw-cli models status --probe --probe-provider openrouter --probe-max-tokens 8 >/dev/null
 
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     echo "Configuring Telegram channel..."
