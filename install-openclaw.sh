@@ -428,6 +428,7 @@ run_install() {
   echo "Running OpenRouter onboarding..."
   compose_cmd run --rm openclaw-cli onboard \
     --non-interactive \
+    --accept-risk \
     --mode local \
     --auth-choice apiKey \
     --token-provider openrouter \
